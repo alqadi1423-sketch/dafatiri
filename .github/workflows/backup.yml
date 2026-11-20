@@ -1,0 +1,49 @@
+# نسخة احتياطية يومية من الدفاتر إلى فرع backups في هذا المستودع الخاص.
+# (Cloudflare نفسها تتيح الاسترجاع لأي لحظة خلال آخر 7 أيام؛ هذه النسخ تحفظ ما قبل ذلك.)
+name: backup
+
+on:
+  schedule:
+    - cron: '17 0 * * *'   # 3:17 فجرًا بتوقيت الرياض
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  backup:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+    steps:
+      - name: التحقق
+        run: |
+          if [ -z "$CLOUDFLARE_API_TOKEN" ] || [ -z "$CLOUDFLARE_ACCOUNT_ID" ]; then echo "لم تُضبط الأسرار بعد"; exit 0; fi
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm ci
+      - name: التصدير
+        run: |
+          printf 'name = "dafatiri"\n[[d1_databases]]\nbinding = "DB"\ndatabase_name = "dafatiri"\ndatabase_id = "%s"\n' \
+            "$(curl -sS "https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID/d1/database?name=dafatiri" \
+               -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" | jq -r '.result[] | select(.name=="dafatiri") | .uuid' | head -1)" > wrangler.toml
+          npx wrangler d1 export dafatiri --remote --output /tmp/dafatiri.sql
+      - name: الحفظ في فرع backups
+        run: |
+          git config user.name "dafatiri-backup"
+          git config user.email "backup@users.noreply.github.com"
+          git fetch origin backups --depth 1 && git switch backups || git switch --orphan backups
+          git rm -rq --cached . 2>/dev/null || true
+          find . -mindepth 1 -maxdepth 1 ! -name .git ! -name backups -exec rm -rf {} +
+          mkdir -p backups
+          cp /tmp/dafatiri.sql "backups/$(date -u +%Y-%m-%d).sql"
+          ls -1 backups/*.sql | sort | head -n -90 | xargs -r rm -f   # يُبقي آخر 90 يومًا
+          git add -A backups
+          git commit -qm "نسخة $(date -u +%Y-%m-%d)" || { echo "لا تغيير"; exit 0; }
+          git push origin backups

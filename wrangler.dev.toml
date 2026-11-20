@@ -1,0 +1,15 @@
+# للتطوير المحلي فقط. ملف النشر wrangler.toml يُولَّد داخل سير النشر من الأسرار.
+name = "dafatiri"
+pages_build_output_dir = "public"
+compatibility_date = "2026-11-01"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "dafatiri"
+database_id = "00000000-0000-0000-0000-000000000000"
+migrations_dir = "migrations"
+
+[vars]
+DEV_MODE = "1"
+DEV_EMAIL = "owner@example.com"
+OWNER_EMAIL = "owner@example.com"

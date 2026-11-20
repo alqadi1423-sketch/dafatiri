@@ -178,7 +178,8 @@ function renderEntry(ledger, members) {
 function renderAccounts(ledger, members) {
   const list = members.map((m) => {
     const { totals, balance } = accountTotals(ledger, m.id);
-    const sub = ledger.config.cols.filter((c) => totals[c.key]).map((c) => `${c.label} ${money(totals[c.key])}`).join('، ');
+    const used = ledger.config.cols.filter((c) => totals[c.key]);
+    const sub = used.length > 1 ? used.map((c) => `${c.label} ${money(totals[c.key])}`).join('، ') : '';
     const det = h('details', { class: 'acct', open: state.openMember === m.id || !state.me.isOwner },
       h('summary', null,
         h('span', { class: 'name' }, m.name, m.role_label ? h('span', { class: 'role' }, m.role_label) : null),
@@ -222,15 +223,15 @@ function renderStatement(ledger, m) {
 }
 
 function deleteButton(t) {
-  const b = h('button', { class: 'btn ghost small', type: 'button' }, 'حذف');
+  const b = h('button', { class: 'btn ghost small del', type: 'button', 'aria-label': 'حذف الحركة' }, '×');
   let armed = false;
   let timer;
   b.addEventListener('click', async () => {
     if (!armed) {
       armed = true;
-      b.textContent = 'تأكيد الحذف';
-      b.className = 'btn danger small';
-      timer = setTimeout(() => { armed = false; b.textContent = 'حذف'; b.className = 'btn ghost small'; }, 4000);
+      b.textContent = 'حذف؟';
+      b.className = 'btn danger small del';
+      timer = setTimeout(() => { armed = false; b.textContent = '×'; b.className = 'btn ghost small del'; }, 4000);
       return;
     }
     clearTimeout(timer);
@@ -368,7 +369,7 @@ function renderFamily() {
     return row;
   });
 
-  return h('div', { style: 'display:grid;gap:18px' },
+  return h('div', { class: 'stack' },
     h('section', { class: 'card' }, h('h2', null, 'إضافة فرد'), form),
     h('section', { class: 'card' }, h('h2', null, 'أفراد العائلة'),
       h('p', { class: 'note' }, 'بعد الإضافة افتح الدفتر، ثم كشف الاسم، واختر من يراه من القائمة.'),

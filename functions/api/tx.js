@@ -1,8 +1,8 @@
 import { json, fail, readJson, toHalala, validDate, cleanText } from '../_lib/http.js';
+import { levelFor, canRecord } from '../_lib/access.js';
 
-// تسجيل حركة جديدة: للمالك وحده
+// تسجيل حركة جديدة: للمالك ولمن له صلاحية التسجيل على الدفتر
 export async function onRequestPost({ request, env, data }) {
-  if (!data.user.isOwner) return fail('التسجيل للمالك فقط', 403);
   const body = await readJson(request);
   if (!body) return fail('بيانات غير صالحة');
 
@@ -20,6 +20,7 @@ export async function onRequestPost({ request, env, data }) {
     `SELECT m.id, m.ledger_id, l.config FROM members m JOIN ledgers l ON l.id = m.ledger_id WHERE m.id = ?1`)
     .bind(memberId).first();
   if (!row) return fail('الاسم غير موجود');
+  if (!canRecord(await levelFor(env, data.user, row.ledger_id))) return fail('ليست لديك صلاحية التسجيل في هذا الدفتر', 403);
 
   const config = JSON.parse(row.config);
   const item = config.items.find((it) => it.label === body.item);

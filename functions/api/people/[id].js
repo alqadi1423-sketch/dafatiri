@@ -19,6 +19,9 @@ export async function onRequestPatch({ request, params, env, data }) {
     if (person.user_id && target.user_id) return fail('كلاهما مرتبط بحساب دخول. افصل أحدهما أولًا');
     await env.DB.batch([
       env.DB.prepare('UPDATE members SET person_id = ?2 WHERE person_id = ?1').bind(person.id, target.id),
+      env.DB.prepare(`INSERT OR IGNORE INTO grants (person_id, ledger_id, level)
+                      SELECT ?2, ledger_id, level FROM grants WHERE person_id = ?1`).bind(person.id, target.id),
+      env.DB.prepare('DELETE FROM grants WHERE person_id = ?1').bind(person.id),
       env.DB.prepare('UPDATE invites SET used_at = strftime(\'%Y-%m-%dT%H:%M:%SZ\',\'now\') WHERE person_id = ?1 AND used_at IS NULL').bind(person.id),
       env.DB.prepare('UPDATE people SET user_id = NULL WHERE id = ?1').bind(person.id),
       env.DB.prepare('UPDATE people SET user_id = COALESCE(user_id, ?2) WHERE id = ?1').bind(target.id, person.user_id),

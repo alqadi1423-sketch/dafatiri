@@ -171,3 +171,12 @@ input[type="date"] { direction: ltr; text-align: left; unicode-bidi: plaintext; 
   .form-actions .btn { width: 100%; }
   .who { gap: 12px; }
 }
+
+/* الصلاحيات */
+.perm-row { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.4fr); gap: 10px; align-items: center; padding: 8px 14px; border-top: 1px solid var(--border); }
+.perm-name { font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.perm-row select { height: 36px; font-size: 13px; }
+.sub-h { margin: 14px 0 8px; font-size: 12px; font-weight: 600; color: var(--muted); }
+.card h3 + .kv + .sub-h, .card h3 + .note + .sub-h { margin-top: 4px; }
+.grant-fields { display: grid; gap: 8px; margin-bottom: 10px; }
+.grant-fields select { height: 36px; font-size: 13px; }

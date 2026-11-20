@@ -1,7 +1,21 @@
 'use strict';
 
 // ================================================================ الحالة والأدوات
-const S = { me: null, ledgers: [], people: [], members: [], tx: [], users: [], invites: [] };
+const S = { me: null, ledgers: [], people: [], members: [], tx: [], users: [], invites: [], grants: [] };
+
+// الصلاحيات على الدفتر
+const LEVEL_LABELS = {
+  none: 'لا يرى الدفتر',
+  own: 'يرى حسابه فقط',
+  view: 'يرى الدفتر كاملًا',
+  record: 'يرى ويسجّل حركات',
+  manage: 'يرى ويسجّل ويحذف ويضيف أشخاصًا',
+};
+const RANK = { none: 0, own: 1, view: 2, record: 3, manage: 4, owner: 5 };
+const canSeeAll = (l) => RANK[l.level] >= RANK.view;
+const canRecord = (l) => RANK[l.level] >= RANK.record;
+const canManage = (l) => RANK[l.level] >= RANK.manage;
+const grantOf = (personId, ledgerId) => (S.grants.find((g) => g.person_id === personId && g.ledger_id === ledgerId) || {}).level || 'own';
 
 const fmt = new Intl.NumberFormat('en-US', { maximumFractionDigits: 2 });
 const money = (h) => fmt.format(h / 100);
@@ -160,41 +174,45 @@ function rowLink(href, main, side, sub) {
 // ================================================================ الصفحات
 function pageHome() {
   if (!S.me.isOwner) {
-    const ms = S.members;
-    if (!ms.length) return [pageHead({ title: 'حساباتي' }), h('p', { class: 'empty' }, 'لا توجد حسابات ظاهرة لك بعد.')];
+    const full = S.ledgers.filter(canSeeAll);
+    const mine = S.members.filter((m) => m.person_id === S.me.personId);
+    if (!full.length && !mine.length) return [pageHead({ title: 'الرئيسية' }), h('p', { class: 'empty' }, 'لا يوجد ما يظهر لك بعد.')];
     return [
-      pageHead({ title: 'حساباتي' }),
-      h('section', { class: 'card list' }, ms.map((m) => {
+      pageHead({ title: 'الرئيسية' }),
+      full.length ? ledgerGrid(full) : null,
+      mine.length ? h('section', { class: 'card list' }, h('h3', null, 'حساباتي'), mine.map((m) => {
         const l = ledgerOf(m.ledger_id);
         const b = totalsOf(l, [m]).balance;
         return rowLink('#/a/' + m.id, l.name, h('span', { class: balClass(b) }, money(b)));
-      })),
+      })) : null,
     ];
   }
   return [
     pageHead({ title: 'الدفاتر' }),
-    S.ledgers.length
-      ? h('div', { class: 'ledger-grid' }, S.ledgers.map((l) => {
-        const ms = membersOf(l);
-        const b = totalsOf(l, ms).balance;
-        return h('a', { class: 'card ledger-card', href: '#/l/' + l.id },
-          h('div', { class: 'lc-top' }, h('span', { class: 'lc-name' }, l.name), l.private ? h('span', { class: 'badge' }, 'خاص') : null),
-          h('div', { class: 'lc-bal ' + balClass(b) }, money(b), h('small', null, 'ريال')),
-          h('div', { class: 'lc-meta' }, `${ms.length} ${ms.length === 1 ? 'حساب' : 'حسابات'}`));
-      }))
-      : h('p', { class: 'empty' }, 'لا توجد دفاتر بعد.'),
+    S.ledgers.length ? ledgerGrid(S.ledgers) : h('p', { class: 'empty' }, 'لا توجد دفاتر بعد.'),
     h('div', { class: 'actions' },
       h('a', { class: 'btn', href: '#/new' }, 'دفتر جديد'),
       h('a', { class: 'btn ghost', href: '#/people' }, `الأشخاص (${S.people.length})`)),
   ];
 }
 
+function ledgerGrid(ledgers) {
+  return h('div', { class: 'ledger-grid' }, ledgers.map((l) => {
+    const ms = membersOf(l);
+    const b = totalsOf(l, ms).balance;
+    return h('a', { class: 'card ledger-card', href: '#/l/' + l.id },
+      h('div', { class: 'lc-top' }, h('span', { class: 'lc-name' }, l.name), l.private ? h('span', { class: 'badge' }, 'خاص') : null),
+      h('div', { class: 'lc-bal ' + balClass(b) }, money(b), h('small', null, 'ريال')),
+      h('div', { class: 'lc-meta' }, `${ms.length} ${ms.length === 1 ? 'حساب' : 'حسابات'}`));
+  }));
+}
+
 function pageLedger(id) {
   const ledger = ledgerOf(id);
-  if (!ledger) return notFound();
+  if (!ledger || !canSeeAll(ledger)) return notFound();
   const ms = membersOf(ledger);
   const out = [
-    pageHead({ back: ['#/', 'الدفاتر'], title: ledger.name, badge: ledger.private ? 'خاص' : null }),
+    pageHead({ back: ['#/', S.me.isOwner ? 'الدفاتر' : 'الرئيسية'], title: ledger.name, badge: ledger.private ? 'خاص' : null }),
     summaryCard(ledger, ms, ledger.config.balanceLabel),
     h('div', { class: 'actions' },
       h('button', {
@@ -213,7 +231,8 @@ function pageLedger(id) {
           h('span', { class: balClass(balance) }, money(balance)), sub);
       }) : h('p', { class: 'empty' }, 'لا توجد حسابات في هذا الدفتر بعد.')),
   ];
-  if (S.me.isOwner) out.push(addMemberCard(ledger, ms), ledgerSettingsCard(ledger));
+  if (canManage(ledger)) out.push(addMemberCard(ledger, ms));
+  if (S.me.isOwner) out.push(permissionsCard(ledger), ledgerSettingsCard(ledger));
   return out;
 }
 
@@ -252,6 +271,46 @@ function ledgerSettingsCard(ledger) {
     }, { ghost: true }));
 }
 
+function levelSelect(value) {
+  const s = h('select', null, Object.entries(LEVEL_LABELS).map(([k, v]) => h('option', { value: k }, v)));
+  s.value = value;
+  return s;
+}
+
+const loginPeople = () => S.people.filter((p) => p.user_id || S.invites.some((i) => i.person_id === p.id));
+
+// صلاحيات الدفتر: لكل شخص له حساب دخول أو دعوة، وتُحفظ فور التغيير
+function permissionsCard(ledger) {
+  if (ledger.private) {
+    return card('صلاحيات الدفتر', h('p', { class: 'note' }, 'الدفتر خاص: لا يدخله أحد غيرك. غيّر ذلك من «إعدادات الدفتر».'));
+  }
+  const ppl = loginPeople();
+  return h('section', { class: 'card list' },
+    h('h3', null, 'صلاحيات الدفتر'),
+    ppl.length ? ppl.map((p) => {
+      const sel = levelSelect(grantOf(p.id, ledger.id));
+      sel.setAttribute('aria-label', 'صلاحية ' + p.name);
+      sel.addEventListener('change', async () => {
+        sel.disabled = true;
+        try {
+          const { grants } = await api('PUT', `/api/people/${p.id}/grants`, { grants: { [ledger.id]: sel.value } });
+          S.grants = S.grants.filter((g) => g.person_id !== p.id).concat(grants);
+          toast(`${p.name}: ${LEVEL_LABELS[sel.value]}`);
+        } catch (ex) { toast(ex.message); sel.value = grantOf(p.id, ledger.id); } finally { sel.disabled = false; }
+      });
+      return h('div', { class: 'perm-row' }, h('a', { href: '#/p/' + p.id, class: 'perm-name' }, p.name), sel);
+    }) : h('p', { class: 'empty' }, 'لا أحد مرتبط بحساب أو مدعو بعد. ادعُ الأشخاص من سجلاتهم.'));
+}
+
+// صلاحيات شخص على كل الدفاتر غير الخاصة: ترجع العنصر ودالة تقرأ القيم
+function grantFields(p) {
+  const ledgers = S.ledgers.filter((l) => !l.private);
+  const sels = ledgers.map((l) => [l, levelSelect(grantOf(p.id, l.id))]);
+  const el = h('div', { class: 'grant-fields' },
+    sels.length ? sels.map(([l, sel], i) => field(`gr-${p.id}-${i}`, l.name, sel, true)) : h('p', { class: 'note' }, 'لا توجد دفاتر مشتركة. كل دفاترك خاصة.'));
+  return { el, value: () => Object.fromEntries(sels.map(([l, sel]) => [l.id, sel.value])) };
+}
+
 function privacySelect(isPrivate) {
   const s = h('select', null,
     h('option', { value: '0' }, 'أنا، وكل صاحب حساب يرى حسابه'),
@@ -267,13 +326,13 @@ function pageAccount(id) {
   const person = personOf(m.person_id) || { name: '' };
   const out = [
     pageHead({
-      back: S.me.isOwner ? ['#/l/' + ledger.id, ledger.name] : ['#/', 'حساباتي'],
+      back: canSeeAll(ledger) ? ['#/l/' + ledger.id, ledger.name] : ['#/', 'الرئيسية'],
       title: person.name,
       sub: [ledger.name, m.role_label].filter(Boolean).join(' · '),
     }),
     summaryCard(ledger, [m], ledger.config.balanceLabel),
   ];
-  if (S.me.isOwner) out.push(entryCard(ledger, m));
+  if (canRecord(ledger)) out.push(entryCard(ledger, m));
   out.push(statementCard(ledger, m));
   if (S.me.isOwner) out.push(h('div', { class: 'actions' }, h('a', { class: 'btn ghost', href: '#/p/' + person.id }, 'سجل ' + person.name)));
   return out;
@@ -311,7 +370,7 @@ function statementCard(ledger, m) {
         h('span', null, h('span', { class: 'num', dir: 'ltr' }, t.date), t.note ? ' · ' + t.note : ''),
         h('span', null, 'الرصيد ', h('b', { class: 'num' }, money(running)))),
     ];
-    if (!S.me.isOwner) return h('li', { class: 'tx' }, head);
+    if (!canManage(ledger)) return h('li', { class: 'tx' }, head);
     return h('li', { class: 'tx' }, h('details', null, h('summary', null, head), txActions(t, sign)));
   });
   return h('section', { class: 'card list' },
@@ -419,9 +478,24 @@ function accessCard(p) {
   if (p.user_id) {
     const u = S.users.find((x) => x.id === p.user_id) || {};
     const pw = h('input', { class: 'ltr', maxlength: '128', autocomplete: 'new-password', placeholder: '8 أحرف على الأقل' });
+    const gf = grantFields(p);
     return card('حساب الدخول',
       h('div', { class: 'kv' }, h('span', null, 'اسم المستخدم'), h('b', { class: 'ltr-text' }, u.username || '')),
-      h('p', { class: 'note' }, 'يرى حساباته في الدفاتر غير الخاصة فقط، ولا يقدر يعدّل شيئًا.'),
+      h('h4', { class: 'sub-h' }, 'الصلاحيات'),
+      gf.el,
+      h('div', { class: 'actions' }, h('button', {
+        class: 'btn', type: 'button',
+        onclick: async (e) => {
+          const b = e.currentTarget;
+          b.disabled = true;
+          try {
+            const { grants } = await api('PUT', `/api/people/${p.id}/grants`, { grants: gf.value() });
+            S.grants = S.grants.filter((g) => g.person_id !== p.id).concat(grants);
+            toast('حُفظت الصلاحيات');
+          } catch (ex) { toast(ex.message); } finally { b.disabled = false; }
+        },
+      }, 'حفظ الصلاحيات')),
+      h('h4', { class: 'sub-h' }, 'كلمة المرور'),
       form([field('ac-pw', 'كلمة مرور جديدة له', pw, true)], 'تعيين', async () => {
         await api('PATCH', '/api/users/' + p.user_id, { password: pw.value });
         pw.value = '';
@@ -441,11 +515,15 @@ function accessCard(p) {
   }
   const box = h('div', { class: 'invite-box' });
   const pending = S.invites.find((i) => i.person_id === p.id);
+  const gf = grantFields(p);
   const btn = h('button', { class: 'btn', type: 'button' }, pending ? 'إنشاء رابط جديد' : 'إنشاء رابط دعوة');
   btn.addEventListener('click', async () => {
     btn.disabled = true;
     try {
-      const { url, expires_at: exp } = await api('POST', `/api/people/${p.id}/invite`);
+      const grants = gf.value();
+      const { url, expires_at: exp } = await api('POST', `/api/people/${p.id}/invite`, { grants });
+      S.grants = S.grants.filter((g) => g.person_id !== p.id)
+        .concat(Object.entries(grants).filter(([, v]) => v !== 'own').map(([ledger_id, level]) => ({ person_id: p.id, ledger_id, level })));
       S.invites = S.invites.filter((i) => i.person_id !== p.id).concat({ person_id: p.id, expires_at: exp });
       const msg = `مرحبًا ${p.name}\nهذا رابط دخولك إلى دفاتري، يعمل مرة واحدة خلال 14 يومًا:\n${url}`;
       box.replaceChildren(
@@ -458,7 +536,9 @@ function accessCard(p) {
   return card('حساب الدخول',
     h('p', { class: 'note' }, pending
       ? 'أُرسلت له دعوة لم تُستخدم بعد. إنشاء رابط جديد يلغي السابق.'
-      : 'غير مرتبط بحساب. أرسل له رابط دعوة لينشئ اسم مستخدم وكلمة مرور، فيرى حساباته فقط.'),
+      : 'غير مرتبط بحساب. حدّد صلاحياته ثم أرسل له رابط دعوة لينشئ اسم مستخدم وكلمة مرور.'),
+    h('h4', { class: 'sub-h' }, 'الصلاحيات'),
+    gf.el,
     box,
     h('div', { class: 'actions' }, btn));
 }
@@ -472,7 +552,7 @@ function pageNewLedger() {
     card(null, form([field('nl-name', 'اسم الدفتر', name, true), field('nl-kind', 'النوع', kind), field('nl-priv', 'من يرى الدفتر', priv)],
       'إنشاء الدفتر', async () => {
         const { ledger } = await api('POST', '/api/ledgers', { name: name.value, kind: kind.value, private: priv.value === '1' });
-        S.ledgers.push(ledger);
+        S.ledgers.push({ ...ledger, level: 'owner' });
         go('#/l/' + ledger.id);
       })),
   ];
@@ -543,7 +623,7 @@ function render() {
   let page;
   switch (parts[0]) {
     case '': page = pageHome(); break;
-    case 'l': page = owner ? pageLedger(parts[1]) : notFound(); break;
+    case 'l': page = pageLedger(parts[1]); break;
     case 'a': page = pageAccount(parts[1]); break;
     case 'people': page = owner ? pagePeople() : notFound(); break;
     case 'p': page = owner ? pagePerson(parts[1]) : notFound(); break;
@@ -556,7 +636,7 @@ function render() {
 
 async function load() {
   const data = await api('GET', '/api/data');
-  Object.assign(S, { users: [], invites: [] }, data);
+  Object.assign(S, { users: [], invites: [], grants: [] }, data);
 }
 
 async function boot() {

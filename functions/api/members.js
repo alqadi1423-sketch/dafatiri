@@ -1,13 +1,15 @@
 import { json, fail, readJson, cleanText } from '../_lib/http.js';
+import { levelFor, canManage } from '../_lib/access.js';
 
-// إضافة شخص إلى دفتر (فتح حساب له فيه): شخص موجود بـ person_id، أو شخص جديد بـ name. للمالك وحده.
+// إضافة شخص إلى دفتر (فتح حساب له فيه): شخص موجود بـ person_id، أو شخص جديد بـ name.
+// للمالك ولمن له صلاحية الإدارة على الدفتر.
 export async function onRequestPost({ request, env, data }) {
-  if (!data.user.isOwner) return fail('للمالك فقط', 403);
   const body = await readJson(request);
   if (!body) return fail('بيانات غير صالحة');
 
   const ledger = await env.DB.prepare('SELECT id FROM ledgers WHERE id = ?1').bind(String(body.ledger_id || '')).first();
   if (!ledger) return fail('الدفتر غير موجود');
+  if (!canManage(await levelFor(env, data.user, ledger.id))) return fail('ليست لديك صلاحية إضافة أشخاص', 403);
   const role = cleanText(body.role_label, 20);
 
   let person;

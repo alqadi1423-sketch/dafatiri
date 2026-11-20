@@ -37,7 +37,7 @@ jobs:
           SQL: ${{ inputs.sql }}
         run: |
           printf '%s\n' "$SQL" > /tmp/run.sql
-          npx wrangler d1 execute dafatiri --remote --file /tmp/run.sql --json > /tmp/out.txt 2>&1 || { tail -20 /tmp/out.txt; exit 1; }
+          npx wrangler d1 execute dafatiri --remote --command "$(cat /tmp/run.sql)" --json > /tmp/out.json 2> /tmp/err.txt || { tail -20 /tmp/err.txt /tmp/out.json; exit 1; }
           # يطبع نتيجة آخر استعلام فقط (للأعداد والتحقق)
-          jq -c '.[-1].results' /tmp/out.txt 2>/dev/null || tail -5 /tmp/out.txt
-          rm -f /tmp/run.sql /tmp/out.txt
+          jq -c '.[-1].results' /tmp/out.json
+          rm -f /tmp/run.sql /tmp/out.json /tmp/err.txt

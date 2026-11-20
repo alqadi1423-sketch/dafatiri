@@ -83,7 +83,7 @@ function ledgerTotals(ledger, members) {
 function renderTabs() {
   const nav = document.getElementById('tabs');
   const tabs = state.ledgers.map((l) => [l.id, l.name]);
-  if (state.me && state.me.isOwner) tabs.push(['__family', 'أفراد العائلة']);
+  if (state.me && state.me.isOwner) tabs.push(['__new', '+ دفتر'], ['__family', 'أفراد العائلة']);
   nav.replaceChildren(...tabs.map(([id, label]) =>
     h('button', {
       class: 'tab', role: 'tab', type: 'button',
@@ -97,6 +97,7 @@ function renderAll() {
   renderTabs();
   const app = document.getElementById('app');
   if (state.current === '__family') { app.replaceChildren(...withPw([renderFamily()])); return; }
+  if (state.current === '__new') { app.replaceChildren(...withPw([renderNewLedger()])); return; }
   const ledger = ledgerOf(state.current);
   if (!ledger) {
     app.replaceChildren(h('p', { class: 'state' },
@@ -108,7 +109,7 @@ function renderAll() {
   const parts = [renderSummary(ledger, members)];
   if (state.me.isOwner) parts.push(renderEntry(ledger, members));
   parts.push(renderAccounts(ledger, members));
-  if (state.me.isOwner) parts.push(renderAddMember(ledger));
+  if (state.me.isOwner) parts.push(renderAddMember(ledger), renderLedgerSettings(ledger));
   app.replaceChildren(...withPw(parts));
 }
 
@@ -304,6 +305,62 @@ function renderAddMember(ledger) {
   return h('section', { class: 'card', 'aria-label': 'فتح حساب جديد' }, h('h2', null, 'فتح حساب جديد في هذا الدفتر'), form);
 }
 
+// ---------------------------------------------------------------- الدفاتر (للمالك)
+const KIND_LABELS = { debts: 'ديون: دين وسداد وإبراء', fund: 'صندوق: إيداع وسحب' };
+
+function renderNewLedger() {
+  const err = h('p', { class: 'form-error', role: 'alert' });
+  const name = h('input', { id: 'g-name', maxlength: '60' });
+  const kind = h('select', { id: 'g-kind' }, Object.entries(KIND_LABELS).map(([k, v]) => h('option', { value: k }, v)));
+  const priv = h('select', { id: 'g-priv' }, h('option', { value: '0' }, 'يمكن ربط كشوفه بأفراد العائلة'), h('option', { value: '1' }, 'خاص بي وحدي'));
+  const btn = h('button', { class: 'btn full', type: 'submit' }, 'إنشاء الدفتر');
+  const form = h('form', {
+    class: 'entry', novalidate: true,
+    onsubmit: async (e) => {
+      e.preventDefault();
+      err.textContent = '';
+      btn.disabled = true;
+      try {
+        const { ledger } = await api('POST', '/api/ledgers', { name: name.value, kind: kind.value, private: priv.value === '1' });
+        state.ledgers.push(ledger);
+        state.current = ledger.id;
+        toast(`أُنشئ ${ledger.name}`);
+        renderAll();
+      } catch (ex) { err.textContent = ex.message; btn.disabled = false; }
+    },
+  },
+  h('label', { class: 'full', for: 'g-name' }, 'اسم الدفتر', name),
+  h('label', { for: 'g-kind' }, 'النوع', kind),
+  h('label', { for: 'g-priv' }, 'الخصوصية', priv),
+  h('div', { class: 'full' }, err), btn);
+  return h('section', { class: 'card' }, h('h2', null, 'دفتر جديد'), form);
+}
+
+function renderLedgerSettings(ledger) {
+  const name = h('input', { id: 's-name', maxlength: '60', value: ledger.name });
+  const priv = h('select', { id: 's-priv' }, h('option', { value: '0' }, 'يمكن ربط كشوفه بأفراد العائلة'), h('option', { value: '1' }, 'خاص بي وحدي'));
+  priv.value = ledger.private ? '1' : '0';
+  const btn = h('button', { class: 'btn ghost full', type: 'submit' }, 'حفظ');
+  const form = h('form', {
+    class: 'entry', novalidate: true,
+    onsubmit: async (e) => {
+      e.preventDefault();
+      btn.disabled = true;
+      try {
+        const { ledger: l } = await api('PATCH', '/api/ledgers/' + ledger.id, { name: name.value, private: priv.value === '1' });
+        Object.assign(ledger, l);
+        if (l.private) state.members.forEach((m) => { if (m.ledger_id === l.id) m.user_id = null; });
+        toast('حُفظت إعدادات الدفتر');
+        renderAll();
+      } catch (ex) { toast(ex.message); btn.disabled = false; }
+    },
+  },
+  h('label', { for: 's-name' }, 'اسم الدفتر', name),
+  h('label', { for: 's-priv' }, 'الخصوصية', priv),
+  btn);
+  return h('section', { class: 'card' }, h('h2', null, 'إعدادات الدفتر'), form);
+}
+
 // ---------------------------------------------------------------- أفراد العائلة (للمالك)
 function renderFamily() {
   const err = h('p', { class: 'form-error', role: 'alert' });
@@ -447,7 +504,7 @@ async function start() {
     Object.assign(state, { users: [] }, data);
     document.getElementById('who-name').textContent = data.me.name;
     document.getElementById('who').hidden = false;
-    state.current = state.ledgers[0] ? state.ledgers[0].id : null;
+    state.current = state.ledgers[0] ? state.ledgers[0].id : (data.me.isOwner ? '__new' : null);
     renderAll();
   } catch (ex) {
     if (!document.querySelector('.login')) document.getElementById('app').replaceChildren(h('p', { class: 'state' }, ex.message));

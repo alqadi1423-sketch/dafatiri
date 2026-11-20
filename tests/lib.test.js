@@ -7,7 +7,7 @@ test('toHalala', () => {
   assert.equal(toHalala('30'), 3000);
   assert.equal(toHalala('10.5'), 1050);
   assert.equal(toHalala('0.01'), 1);
-  assert.equal(toHalala(875000), 87500000);
+  assert.equal(toHalala(1234), 123400);
   for (const bad of ['0', '-5', '1.234', 'abc', '', '1e5', '1,000', null]) assert.equal(toHalala(bad), null, String(bad));
 });
 

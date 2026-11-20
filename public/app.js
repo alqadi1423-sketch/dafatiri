@@ -29,12 +29,19 @@ function h(tag, attrs, ...children) {
 }
 
 let toastTimer;
-function toast(msg) {
+function toast(msg, action) {
   const t = document.getElementById('toast');
-  t.textContent = msg;
+  t.replaceChildren(h('span', null, msg));
+  if (action) {
+    t.append(h('button', {
+      type: 'button', class: 'toast-act',
+      onclick: () => { t.classList.remove('show'); action.run(); },
+    }, action.label));
+  }
+  t.classList.toggle('has-act', !!action);
   t.classList.add('show');
   clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => t.classList.remove('show'), 2600);
+  toastTimer = setTimeout(() => t.classList.remove('show'), action ? 7000 : 2600);
 }
 
 class AuthError extends Error {}
@@ -57,7 +64,7 @@ async function copyText(text) {
     await navigator.clipboard.writeText(text);
     return true;
   } catch {
-    const ta = h('textarea', { style: 'position:fixed;opacity:0' }, text);
+    const ta = h('textarea', { class: 'offscreen' }, text);
     document.body.append(ta);
     ta.select();
     let ok = false;
@@ -76,7 +83,8 @@ const membersOf = (ledger) => S.members.filter((m) => m.ledger_id === ledger.id)
   .sort((a, b) => a.sort - b.sort || a.id - b.id);
 const nameOfMember = (m) => (personOf(m.person_id) || {}).name || '';
 const signOf = (ledger, col) => (ledger.config.cols.find((c) => c.key === col) || {}).sign || 0;
-const txOf = (m) => S.tx.filter((t) => t.member_id === m.id);
+const txOf = (m) => S.tx.filter((t) => t.member_id === m.id)
+  .sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : a.id - b.id));
 
 function totalsOf(ledger, members) {
   const totals = Object.fromEntries(ledger.config.cols.map((c) => [c.key, 0]));
@@ -111,7 +119,7 @@ function summaryCard(ledger, members, label) {
   return h('section', { class: 'card summary' },
     h('div', { class: 'big-label' }, label),
     h('div', { class: 'big ' + balClass(balance) }, money(balance), h('small', null, 'ريال')),
-    h('div', { class: 'tiles' }, ledger.config.cols.map((c) =>
+    h('div', { class: 'tiles n' + ledger.config.cols.length }, ledger.config.cols.map((c) =>
       h('div', { class: 'tile' }, h('span', null, c.label), h('b', { class: 'num' }, money(totals[c.key]))))));
 }
 
@@ -172,7 +180,7 @@ function pageHome() {
         return h('a', { class: 'card ledger-card', href: '#/l/' + l.id },
           h('div', { class: 'lc-top' }, h('span', { class: 'lc-name' }, l.name), l.private ? h('span', { class: 'badge' }, 'خاص') : null),
           h('div', { class: 'lc-bal ' + balClass(b) }, money(b), h('small', null, 'ريال')),
-          h('div', { class: 'lc-meta' }, `${ms.length} ${ms.length === 1 ? 'حساب' : 'حسابات'}`, ' · ', l.config.balanceLabel));
+          h('div', { class: 'lc-meta' }, `${ms.length} ${ms.length === 1 ? 'حساب' : 'حسابات'}`));
       }))
       : h('p', { class: 'empty' }, 'لا توجد دفاتر بعد.'),
     h('div', { class: 'actions' },
@@ -275,7 +283,7 @@ function entryCard(ledger, m) {
   const items = [...ledger.config.items.filter((i) => i.label !== 'رصيد افتتاحي'), ...ledger.config.items.filter((i) => i.label === 'رصيد افتتاحي')];
   const item = h('select', null, items.map((i) => h('option', { value: i.label }, i.label)));
   const amount = h('input', { inputmode: 'decimal', autocomplete: 'off', placeholder: '0' });
-  const date = h('input', { type: 'date', value: today() });
+  const date = h('input', { type: 'date', value: today(), dir: 'ltr' });
   const note = h('input', { maxlength: '200', placeholder: 'اختياري' });
   return card('تسجيل حركة',
     form([field('e-item', 'البند', item), field('e-amount', 'المبلغ (ريال)', amount),
@@ -292,50 +300,59 @@ function entryCard(ledger, m) {
 function statementCard(ledger, m) {
   const rows = txOf(m);
   let running = 0;
-  const body = rows.map((t) => {
+  const items = rows.map((t) => {
     const sign = signOf(ledger, t.col);
     running += sign * t.amount;
-    return h('tr', null,
-      h('td', { class: 'date' }, t.date),
-      h('td', null, h('span', { class: 'pill ' + (sign > 0 ? 'plus' : 'minus') }, t.item), t.note ? h('div', { class: 'note' }, t.note) : null),
-      h('td', { class: 'num' }, (sign > 0 ? '+' : '−') + money(t.amount)),
-      h('td', { class: 'num' }, money(running)),
-      S.me.isOwner ? h('td', { class: 'act' }, deleteButton(t)) : null);
+    const head = [
+      h('div', { class: 'tx-main' },
+        h('span', { class: 'pill ' + (sign > 0 ? 'plus' : 'minus') }, t.item),
+        h('span', { class: 'tx-amt num ' + (sign > 0 ? 'plus-t' : 'minus-t'), dir: 'ltr' }, (sign > 0 ? '+' : '−') + money(t.amount))),
+      h('div', { class: 'tx-sub' },
+        h('span', null, h('span', { class: 'num', dir: 'ltr' }, t.date), t.note ? ' · ' + t.note : ''),
+        h('span', null, 'الرصيد ', h('b', { class: 'num' }, money(running)))),
+    ];
+    if (!S.me.isOwner) return h('li', { class: 'tx' }, head);
+    return h('li', { class: 'tx' }, h('details', null, h('summary', null, head), txActions(t, sign)));
   });
-  return h('section', { class: 'card flush' },
+  return h('section', { class: 'card list' },
     h('h3', null, 'كشف الحساب'),
-    rows.length ? h('div', { class: 'table-wrap' }, h('table', null,
-      h('thead', null, h('tr', null, h('th', null, 'التاريخ'), h('th', null, 'البند'), h('th', null, 'المبلغ'), h('th', null, 'الرصيد'),
-        S.me.isOwner ? h('th', null, '') : null)),
-      h('tbody', null, body))) : h('p', { class: 'empty' }, 'لا توجد حركات.'));
+    rows.length ? h('ul', { class: 'tx-list' }, items) : h('p', { class: 'empty' }, 'لا توجد حركات.'));
 }
 
-function deleteButton(t) {
-  const b = h('button', { class: 'icon-btn', type: 'button', 'aria-label': 'حذف الحركة' }, '×');
-  let armed = false;
-  let timer;
-  b.addEventListener('click', async () => {
-    if (!armed) {
-      armed = true;
-      b.textContent = 'حذف؟';
-      b.classList.add('armed');
-      timer = setTimeout(() => { armed = false; b.textContent = '×'; b.classList.remove('armed'); }, 4000);
-      return;
-    }
-    clearTimeout(timer);
-    b.disabled = true;
-    try {
-      await api('DELETE', '/api/tx/' + t.id);
-      S.tx = S.tx.filter((x) => x.id !== t.id);
-      toast('حُذفت الحركة');
-      render();
-    } catch (ex) {
-      if (ex instanceof AuthError) return showLogin();
-      toast(ex.message);
-      b.disabled = false;
-    }
+// الحذف بخطوتين واضحتين، ثم إمكانية التراجع
+function txActions(t, sign) {
+  const box = h('div', { class: 'tx-actions' });
+  const ask = h('button', { class: 'btn ghost danger-text small', type: 'button' }, 'حذف الحركة');
+  ask.addEventListener('click', () => {
+    const yes = h('button', { class: 'btn danger small', type: 'button' }, 'نعم، احذفها');
+    const no = h('button', { class: 'btn ghost small', type: 'button', onclick: () => box.replaceChildren(ask) }, 'إلغاء');
+    yes.addEventListener('click', async () => {
+      yes.disabled = true;
+      try {
+        await api('DELETE', '/api/tx/' + t.id);
+        S.tx = S.tx.filter((x) => x.id !== t.id);
+        render();
+        toast(`حُذفت حركة ${t.item} ${money(t.amount)}`, { label: 'تراجع', run: () => restoreTx(t) });
+      } catch (ex) {
+        if (ex instanceof AuthError) return showLogin();
+        toast(ex.message);
+        yes.disabled = false;
+      }
+    });
+    box.replaceChildren(h('p', { class: 'confirm' }, `حذف ${t.item} ${(sign > 0 ? '+' : '−') + money(t.amount)} بتاريخ `, h('span', { dir: 'ltr' }, t.date), '؟'), h('div', { class: 'actions' }, yes, no));
   });
-  return b;
+  box.append(ask);
+  return box;
+}
+
+async function restoreTx(t) {
+  try {
+    const { tx } = await api('POST', `/api/tx/${t.id}/restore`);
+    S.tx.push(tx);
+    S.tx.sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : a.id - b.id));
+    render();
+    toast('أُعيدت الحركة');
+  } catch (ex) { toast(ex.message); }
 }
 
 function pagePeople() {

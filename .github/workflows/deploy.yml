@@ -71,4 +71,5 @@ jobs:
 
       - name: الرابط
         if: env.SKIP != '1'
-        run: echo "### الموقع: $SITE_URL" >> "$GITHUB_STEP_SUMMARY"
+        run: |
+          echo "### الموقع: $SITE_URL" >> "$GITHUB_STEP_SUMMARY"

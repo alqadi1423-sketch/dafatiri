@@ -9,7 +9,7 @@ export async function onRequestDelete({ params, env, data }) {
   const res = await env.DB.prepare(
     `UPDATE tx SET deleted_at = strftime('%Y-%m-%dT%H:%M:%SZ','now'), deleted_by = ?2
       WHERE id = ?1 AND deleted_at IS NULL`)
-    .bind(id, data.user.email).run();
+    .bind(id, data.user.username).run();
   if (!res.meta.changes) return fail('حركة غير موجودة', 404);
   return json({ ok: true });
 }

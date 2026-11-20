@@ -8,8 +8,3 @@ binding = "DB"
 database_name = "dafatiri"
 database_id = "00000000-0000-0000-0000-000000000000"
 migrations_dir = "migrations"
-
-[vars]
-DEV_MODE = "1"
-DEV_EMAIL = "owner@example.com"
-OWNER_EMAIL = "owner@example.com"

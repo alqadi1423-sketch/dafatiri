@@ -46,7 +46,3 @@ export function cleanText(s, max) {
   if (!t) return null;
   return t.slice(0, max);
 }
-
-export function validEmail(s) {
-  return typeof s === 'string' && s.length <= 254 && /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(s);
-}

@@ -20,7 +20,7 @@ export async function onRequestPost({ request, env, data }) {
   const member = await env.DB.prepare(
     `INSERT INTO members (ledger_id, name, role_label, sort)
      VALUES (?1, ?2, ?3, (SELECT COALESCE(MAX(sort), 0) + 1 FROM members WHERE ledger_id = ?1))
-     RETURNING id, ledger_id, name, role_label, email, sort`)
+     RETURNING id, ledger_id, name, role_label, user_id, sort`)
     .bind(ledger.id, name, role).first();
   return json({ member }, 201);
 }

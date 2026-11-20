@@ -29,7 +29,7 @@ export async function onRequestPost({ request, env, data }) {
     `INSERT INTO tx (ledger_id, member_id, date, item, col, amount, note, created_by)
      VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
      RETURNING id, ledger_id, member_id, date, item, col, amount, note, created_at`)
-    .bind(row.ledger_id, memberId, body.date, item.label, item.col, amount, note, data.user.email)
+    .bind(row.ledger_id, memberId, body.date, item.label, item.col, amount, note, data.user.username)
     .first();
 
   return json({ tx: res }, 201);

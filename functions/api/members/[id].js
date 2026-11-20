@@ -1,25 +1,26 @@
-import { json, fail, readJson, validEmail } from '../../_lib/http.js';
+import { json, fail, readJson } from '../../_lib/http.js';
 
-// ربط حساب ببريد فرد من العائلة (أو فكّه بإرسال بريد فارغ): للمالك وحده
+// ربط حساب في دفتر بمستخدم من العائلة ليراه عند دخوله (أو فكّه بـ null): للمالك وحده
 export async function onRequestPatch({ request, params, env, data }) {
   if (!data.user.isOwner) return fail('للمالك فقط', 403);
   const id = Number(params.id);
   if (!Number.isInteger(id) || id <= 0) return fail('الاسم غير موجود', 404);
 
   const body = await readJson(request);
-  if (!body || !('email' in body)) return fail('بيانات غير صالحة');
-
-  let email = String(body.email || '').trim().toLowerCase();
-  if (email && !validEmail(email)) return fail('البريد غير صحيح');
-  if (!email) email = null;
+  if (!body || !('user_id' in body)) return fail('بيانات غير صالحة');
+  const userId = body.user_id === null || body.user_id === '' ? null : Number(body.user_id);
 
   const row = await env.DB.prepare('SELECT m.id, l.private FROM members m JOIN ledgers l ON l.id = m.ledger_id WHERE m.id = ?1')
     .bind(id).first();
   if (!row) return fail('الاسم غير موجود', 404);
-  if (row.private && email) return fail('الدفتر الخاص لا يُربط بأحد');
+  if (userId !== null) {
+    if (row.private) return fail('الدفتر الخاص لا يُربط بأحد');
+    const u = await env.DB.prepare('SELECT id FROM users WHERE id = ?1 AND is_owner = 0').bind(userId).first();
+    if (!u) return fail('المستخدم غير موجود');
+  }
 
   const member = await env.DB.prepare(
-    'UPDATE members SET email = ?2 WHERE id = ?1 RETURNING id, ledger_id, name, role_label, email, sort')
-    .bind(id, email).first();
+    'UPDATE members SET user_id = ?2 WHERE id = ?1 RETURNING id, ledger_id, name, role_label, user_id, sort')
+    .bind(id, userId).first();
   return json({ member });
 }

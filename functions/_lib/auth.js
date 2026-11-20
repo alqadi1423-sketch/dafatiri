@@ -1,92 +1,73 @@
-// التحقق من هوية الزائر عبر Cloudflare Access.
-// Access يقف أمام الموقع كله ويطلب الدخول برمز البريد، ثم يرسل مع كل طلب توقيعًا (JWT)
-// نتحقق منه هنا بأنفسنا، فلا نعتمد على مجرد وجود ترويسة يمكن تزويرها.
+// الجلسات: رمز عشوائي في ملف تعريف ارتباط محمي، ويُحفظ في قاعدة البيانات مجزّأً فقط.
+const COOKIE = 'sid';
+const DAYS = 30;
 
-let jwksCache = { at: 0, keys: null, domain: null };
-
-function b64urlToBytes(s) {
-  s = s.replace(/-/g, '+').replace(/_/g, '/');
-  while (s.length % 4) s += '=';
-  const bin = atob(s);
-  const out = new Uint8Array(bin.length);
-  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
-  return out;
+const hex = (buf) => [...new Uint8Array(buf)].map((b) => b.toString(16).padStart(2, '0')).join('');
+async function sha256(text) {
+  return hex(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(text)));
 }
 
-function decodePart(part) {
-  return JSON.parse(new TextDecoder().decode(b64urlToBytes(part)));
-}
-
-async function getKeys(teamDomain) {
-  const now = Date.now();
-  if (jwksCache.keys && jwksCache.domain === teamDomain && now - jwksCache.at < 10 * 60 * 1000) {
-    return jwksCache.keys;
-  }
-  const res = await fetch(`${teamDomain}/cdn-cgi/access/certs`);
-  if (!res.ok) throw new Error('certs');
-  const body = await res.json();
-  jwksCache = { at: now, keys: body.keys || [], domain: teamDomain };
-  return jwksCache.keys;
-}
-
-function readToken(request) {
-  const h = request.headers.get('Cf-Access-Jwt-Assertion');
-  if (h) return h;
-  const cookie = request.headers.get('Cookie') || '';
-  const m = cookie.match(/(?:^|;\s*)CF_Authorization=([^;]+)/);
+function readCookie(request) {
+  const m = (request.headers.get('Cookie') || '').match(/(?:^|;\s*)sid=([A-Za-z0-9_-]{20,100})/);
   return m ? m[1] : null;
 }
 
-export async function verifyAccess(request, env) {
-  const token = readToken(request);
+export async function identify(request, env) {
+  const token = readCookie(request);
   if (!token) return null;
-  const parts = token.split('.');
-  if (parts.length !== 3) return null;
-
-  let header, payload;
-  try {
-    header = decodePart(parts[0]);
-    payload = decodePart(parts[1]);
-  } catch {
-    return null;
-  }
-  if (header.alg !== 'RS256') return null;
-
-  const teamDomain = String(env.ACCESS_TEAM_DOMAIN || '').replace(/\/+$/, '');
-  if (!teamDomain || !env.ACCESS_AUD) return null;
-
-  const keys = await getKeys(teamDomain);
-  const jwk = keys.find((k) => k.kid === header.kid);
-  if (!jwk) return null;
-
-  const key = await crypto.subtle.importKey(
-    'jwk', jwk, { name: 'RSASSA-PKCS1-v1_5', hash: 'SHA-256' }, false, ['verify']);
-  const ok = await crypto.subtle.verify(
-    'RSASSA-PKCS1-v1_5', key, b64urlToBytes(parts[2]),
-    new TextEncoder().encode(parts[0] + '.' + parts[1]));
-  if (!ok) return null;
-
-  const now = Math.floor(Date.now() / 1000);
-  if (typeof payload.exp !== 'number' || payload.exp < now) return null;
-  if (typeof payload.nbf === 'number' && payload.nbf > now + 60) return null;
-  if (payload.iss !== teamDomain) return null;
-  const aud = Array.isArray(payload.aud) ? payload.aud : [payload.aud];
-  if (!aud.includes(env.ACCESS_AUD)) return null;
-  if (!payload.email) return null;
-
-  return String(payload.email).trim().toLowerCase();
+  const row = await env.DB.prepare(
+    `SELECT u.id, u.username, u.name, u.is_owner FROM sessions s JOIN users u ON u.id = s.user_id
+      WHERE s.token_hash = ?1 AND s.expires_at > strftime('%Y-%m-%dT%H:%M:%SZ','now') AND u.disabled = 0`)
+    .bind(await sha256(token)).first();
+  if (!row) return null;
+  return { id: row.id, username: row.username, name: row.name, isOwner: !!row.is_owner };
 }
 
-export async function identify(request, env) {
-  let email = null;
-  // وضع التطوير المحلي فقط: لا يعمل إلا إذا ضُبط صراحة، ولا يُضبط أبدًا في النشر
-  if (env.DEV_MODE === '1' && env.DEV_EMAIL) {
-    email = request.headers.get('X-Dev-Email') || env.DEV_EMAIL;
-    email = email.trim().toLowerCase();
-  } else {
-    email = await verifyAccess(request, env);
+export async function startSession(env, userId) {
+  const bytes = crypto.getRandomValues(new Uint8Array(32));
+  const token = btoa(String.fromCharCode(...bytes)).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+  const expires = new Date(Date.now() + DAYS * 864e5).toISOString().replace(/\.\d+Z$/, 'Z');
+  await env.DB.batch([
+    env.DB.prepare(`DELETE FROM sessions WHERE expires_at <= strftime('%Y-%m-%dT%H:%M:%SZ','now')`),
+    env.DB.prepare('INSERT INTO sessions (token_hash, user_id, expires_at) VALUES (?1, ?2, ?3)')
+      .bind(await sha256(token), userId, expires),
+  ]);
+  return `${COOKIE}=${token}; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=${DAYS * 86400}`;
+}
+
+export async function endSession(request, env) {
+  const token = readCookie(request);
+  if (token) await env.DB.prepare('DELETE FROM sessions WHERE token_hash = ?1').bind(await sha256(token)).run();
+  return `${COOKIE}=; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=0`;
+}
+
+export async function endAllSessions(env, userId) {
+  await env.DB.prepare('DELETE FROM sessions WHERE user_id = ?1').bind(userId).run();
+}
+
+// إيقاف التخمين: 10 محاولات فاشلة خلال 15 دقيقة لكل اسم مستخدم ولكل عنوان
+const LIMIT = 10;
+const WINDOW_MIN = 15;
+
+export async function tooManyFailures(env, keys) {
+  for (const key of keys) {
+    const row = await env.DB.prepare(
+      `SELECT count FROM login_failures WHERE key = ?1
+         AND window_start > strftime('%Y-%m-%dT%H:%M:%SZ','now', ?2)`).bind(key, `-${WINDOW_MIN} minutes`).first();
+    if (row && row.count >= LIMIT) return true;
   }
-  if (!email) return null;
-  const owner = String(env.OWNER_EMAIL || '').trim().toLowerCase();
-  return { email, isOwner: !!owner && email === owner };
+  return false;
+}
+
+export async function recordFailure(env, keys) {
+  await env.DB.batch(keys.map((key) => env.DB.prepare(
+    `INSERT INTO login_failures (key, count, window_start) VALUES (?1, 1, strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+     ON CONFLICT(key) DO UPDATE SET
+       count = CASE WHEN window_start > strftime('%Y-%m-%dT%H:%M:%SZ','now', ?2) THEN count + 1 ELSE 1 END,
+       window_start = CASE WHEN window_start > strftime('%Y-%m-%dT%H:%M:%SZ','now', ?2) THEN window_start
+                           ELSE strftime('%Y-%m-%dT%H:%M:%SZ','now') END`).bind(key, `-${WINDOW_MIN} minutes`)));
+}
+
+export async function clearFailures(env, key) {
+  await env.DB.prepare('DELETE FROM login_failures WHERE key = ?1').bind(key).run();
 }

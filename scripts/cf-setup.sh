@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# يجهّز كل ما في Cloudflare مرة واحدة ويعيد استخدامه بعدها: قاعدة البيانات، مشروع الموقع، حماية الدخول.
-# يكتب wrangler.toml للنشر. يحتاج: CLOUDFLARE_API_TOKEN، CLOUDFLARE_ACCOUNT_ID، OWNER_EMAIL.
+# يجهّز ما في Cloudflare مرة واحدة ويعيد استخدامه بعدها: قاعدة البيانات ومشروع الموقع.
+# يكتب wrangler.toml للنشر. يحتاج: CLOUDFLARE_API_TOKEN و CLOUDFLARE_ACCOUNT_ID.
 set -euo pipefail
 
 NAME=dafatiri
@@ -36,43 +36,6 @@ fi
 HOST=$(echo "$PROJ" | jq -r '.result.subdomain')
 [ -n "$HOST" ] && [ "$HOST" != "null" ] || { echo "لم يُعرف رابط الموقع"; exit 1; }
 
-# 3) حماية الدخول (Cloudflare Access)
-if ! ORG=$(cf GET /access/organizations 2>/dev/null); then
-  echo "::error::لم يُفعَّل Zero Trust في حسابك بعد. فعّله مرة واحدة من لوحة Cloudflare ثم أعد التشغيل."
-  exit 1
-fi
-TEAM=$(echo "$ORG" | jq -r '.result.auth_domain')
-[ -n "$TEAM" ] && [ "$TEAM" != "null" ] || { echo "::error::لم يُعرف نطاق الفريق في Zero Trust"; exit 1; }
-
-# الدخول برمز يصل للبريد
-if [ -z "$(cf GET /access/identity_providers | jq -r '.result[] | select(.type == "onetimepin") | .id' | head -1)" ]; then
-  cf POST /access/identity_providers '{"name":"رمز البريد","type":"onetimepin","config":{}}' > /dev/null
-  echo "فُعّل الدخول برمز البريد"
-fi
-
-# السياسة: كل من يثبت ملكية بريده يمر من البوابة، والموقع نفسه لا يعرض له شيئًا
-# إلا إن كان المالك أو ربطتَ بريده بحساب. فتضيف أفراد العائلة من داخل الموقع دون لمس Cloudflare.
-POLICY_ID=$(cf GET /access/policies | jq -r '.result[] | select(.name == "dafatiri-allow") | .id' | head -1)
-if [ -z "$POLICY_ID" ]; then
-  POLICY_ID=$(cf POST /access/policies '{"name":"dafatiri-allow","decision":"allow","include":[{"everyone":{}}],"session_duration":"720h"}' | jq -r '.result.id')
-fi
-
-APP=$(cf GET /access/apps | jq -c --arg n "$NAME" '[.result[] | select(.name == $n)][0] // empty')
-APP_BODY=$(jq -nc --arg n "$NAME" --arg h "$HOST" --arg p "$POLICY_ID" '{
-  name: $n, type: "self_hosted", domain: $h,
-  self_hosted_domains: [$h, ("*." + $h)],
-  session_duration: "720h", app_launcher_visible: false,
-  auto_redirect_to_identity: true,
-  policies: [{id: $p, precedence: 1}]
-}')
-if [ -z "$APP" ]; then
-  APP=$(cf POST /access/apps "$APP_BODY" | jq -c '.result')
-  echo "فُعّلت حماية الدخول على $HOST"
-else
-  APP=$(cf PUT "/access/apps/$(echo "$APP" | jq -r '.id')" "$APP_BODY" | jq -c '.result')
-fi
-AUD=$(echo "$APP" | jq -r '.aud')
-
 # 4) ملف النشر
 cat > wrangler.toml <<EOF
 name = "$NAME"
@@ -84,11 +47,6 @@ binding = "DB"
 database_name = "$NAME"
 database_id = "$DB_ID"
 migrations_dir = "migrations"
-
-[vars]
-OWNER_EMAIL = "$(echo "$OWNER_EMAIL" | tr '[:upper:]' '[:lower:]' | tr -d '"\\')"
-ACCESS_TEAM_DOMAIN = "https://$TEAM"
-ACCESS_AUD = "$AUD"
 EOF
 
 echo "SITE_URL=https://$HOST" >> "${GITHUB_ENV:-/dev/null}"

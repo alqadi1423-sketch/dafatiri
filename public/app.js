@@ -1,6 +1,6 @@
 'use strict';
 
-const state = { me: null, ledgers: [], members: [], tx: [], current: null, openMember: null };
+const state = { me: null, ledgers: [], members: [], tx: [], users: [], current: null, openMember: null, showPw: false };
 
 const fmt = new Intl.NumberFormat('en-US', { maximumFractionDigits: 2 });
 const money = (h) => fmt.format(h / 100);
@@ -46,7 +46,7 @@ async function api(method, path, body) {
   let data = null;
   try { data = await res.json(); } catch { /* فارغ */ }
   if (!res.ok) {
-    if (res.status === 401) throw new Error('انتهت الجلسة. حدّث الصفحة وسجّل الدخول من جديد.');
+    if (res.status === 401 && path !== '/api/login') { renderLogin(); throw new Error('سجّل الدخول من جديد.'); }
     throw new Error((data && data.error) || 'تعذّر الاتصال، حاول مرة أخرى.');
   }
   return data;
@@ -82,23 +82,26 @@ function ledgerTotals(ledger, members) {
 // ---------------------------------------------------------------- العرض
 function renderTabs() {
   const nav = document.getElementById('tabs');
-  nav.replaceChildren(...state.ledgers.map((l) =>
+  const tabs = state.ledgers.map((l) => [l.id, l.name]);
+  if (state.me && state.me.isOwner) tabs.push(['__family', 'أفراد العائلة']);
+  nav.replaceChildren(...tabs.map(([id, label]) =>
     h('button', {
       class: 'tab', role: 'tab', type: 'button',
-      'aria-selected': String(l.id === state.current),
-      onclick: () => { state.current = l.id; state.openMember = null; renderAll(); },
-    }, l.name)));
-  nav.hidden = state.ledgers.length < 2;
+      'aria-selected': String(id === state.current),
+      onclick: () => { state.current = id; state.openMember = null; renderAll(); },
+    }, label)));
+  nav.hidden = tabs.length < 2;
 }
 
 function renderAll() {
   renderTabs();
   const app = document.getElementById('app');
+  if (state.current === '__family') { app.replaceChildren(...withPw([renderFamily()])); return; }
   const ledger = ledgerOf(state.current);
   if (!ledger) {
     app.replaceChildren(h('p', { class: 'state' },
       state.me.isOwner ? 'لا توجد دفاتر بعد.' :
-        'لا توجد حسابات مربوطة ببريدك بعد. اطلب من صاحب الدفاتر ربط حسابك ببريدك هذا.'));
+        'لا توجد حسابات مربوطة بك بعد. اطلب من صاحب الدفاتر ربطها باسمك.'));
     return;
   }
   const members = state.members.filter((m) => m.ledger_id === ledger.id);
@@ -106,7 +109,7 @@ function renderAll() {
   if (state.me.isOwner) parts.push(renderEntry(ledger, members));
   parts.push(renderAccounts(ledger, members));
   if (state.me.isOwner) parts.push(renderAddMember(ledger));
-  app.replaceChildren(...parts);
+  app.replaceChildren(...withPw(parts));
 }
 
 function balanceClass(b) { return b === 0 ? 'zero' : b < 0 ? 'neg' : ''; }
@@ -215,7 +218,7 @@ function renderStatement(ledger, m) {
         state.me.isOwner ? h('th', null, '') : null)),
       h('tbody', null, body)))
     : h('p', { class: 'note' }, 'لا توجد حركات.');
-  return h('div', { class: 'stmt' }, table, state.me.isOwner && !ledger.private ? linkEmail(m) : null);
+  return h('div', { class: 'stmt' }, table, state.me.isOwner && !ledger.private ? linkUser(m) : null);
 }
 
 function deleteButton(t) {
@@ -245,24 +248,27 @@ function deleteButton(t) {
   return b;
 }
 
-function linkEmail(m) {
-  const id = 'email-' + m.id;
-  const input = h('input', { id, type: 'email', value: m.email || '', placeholder: 'name@example.com', autocomplete: 'off' });
-  const btn = h('button', { class: 'btn ghost small', type: 'button' }, 'حفظ البريد');
-  btn.addEventListener('click', async () => {
-    btn.disabled = true;
+function linkUser(m) {
+  const id = 'link-' + m.id;
+  const sel = h('select', { id },
+    h('option', { value: '' }, 'غير مربوط'),
+    (state.users || []).filter((u) => !u.is_owner).map((u) =>
+      h('option', { value: String(u.id) }, u.name + ' (' + u.username + ')' + (u.disabled ? ' موقوف' : ''))));
+  sel.value = m.user_id ? String(m.user_id) : '';
+  sel.addEventListener('change', async () => {
+    sel.disabled = true;
     try {
-      const { member } = await api('PATCH', '/api/members/' + m.id, { email: input.value.trim() });
+      const { member } = await api('PATCH', '/api/members/' + m.id, { user_id: sel.value ? Number(sel.value) : null });
       Object.assign(m, member);
-      toast(member.email ? `رُبط حساب ${m.name} بالبريد` : `فُكّ ربط حساب ${m.name}`);
+      toast(member.user_id ? `رُبط حساب ${m.name}` : `فُكّ ربط حساب ${m.name}`);
     } catch (ex) {
       toast(ex.message);
+      sel.value = m.user_id ? String(m.user_id) : '';
     } finally {
-      btn.disabled = false;
+      sel.disabled = false;
     }
   });
-  return h('div', { class: 'link-row' },
-    h('label', { for: id }, 'بريد صاحب الحساب (ليرى كشفه فقط)', input), btn);
+  return h('div', { class: 'link-row' }, h('label', { for: id }, 'من يرى هذا الكشف من العائلة', sel));
 }
 
 function renderAddMember(ledger) {
@@ -297,16 +303,153 @@ function renderAddMember(ledger) {
   return h('section', { class: 'card', 'aria-label': 'فتح حساب جديد' }, h('h2', null, 'فتح حساب جديد في هذا الدفتر'), form);
 }
 
+// ---------------------------------------------------------------- أفراد العائلة (للمالك)
+function renderFamily() {
+  const err = h('p', { class: 'form-error', role: 'alert' });
+  const name = h('input', { id: 'u-name', maxlength: '40' });
+  const username = h('input', { id: 'u-user', class: 'ltr', maxlength: '30', autocapitalize: 'none', autocomplete: 'off', placeholder: 'mona' });
+  const pw = h('input', { id: 'u-pw', class: 'ltr', maxlength: '128', autocomplete: 'new-password', placeholder: '8 أحرف على الأقل' });
+  const btn = h('button', { class: 'btn full', type: 'submit' }, 'إضافة');
+  const form = h('form', {
+    class: 'entry', novalidate: true,
+    onsubmit: async (e) => {
+      e.preventDefault();
+      err.textContent = '';
+      btn.disabled = true;
+      try {
+        const { user } = await api('POST', '/api/users', { name: name.value, username: username.value, password: pw.value });
+        state.users.push(user);
+        toast(`أُضيف ${user.name}. أعطه اسم المستخدم وكلمة المرور`);
+        renderAll();
+      } catch (ex) {
+        err.textContent = ex.message;
+      } finally {
+        btn.disabled = false;
+      }
+    },
+  },
+  h('label', { class: 'full', for: 'u-name' }, 'الاسم', name),
+  h('label', { for: 'u-user' }, 'اسم المستخدم (إنجليزي)', username),
+  h('label', { for: 'u-pw' }, 'كلمة المرور', pw),
+  h('div', { class: 'full' }, err), btn);
+
+  const rows = state.users.filter((u) => !u.is_owner).map((u) => {
+    const linked = state.members.filter((m) => m.user_id === u.id)
+      .map((m) => (ledgerOf(m.ledger_id) || {}).name?.replace(/^دفتر \d+: /, '') + ': ' + m.name);
+    const reset = h('button', { class: 'btn ghost small', type: 'button' }, 'كلمة مرور جديدة');
+    const toggle = h('button', { class: 'btn ghost small', type: 'button' }, u.disabled ? 'تفعيل' : 'إيقاف');
+    const row = h('div', { class: 'user-row' + (u.disabled ? ' off' : '') },
+      h('div', null, h('div', { class: 'name' }, u.name, ' ', h('span', { class: 'uname' }, u.username)),
+        h('div', { class: 'note' }, linked.length ? 'يرى: ' + linked.join('، ') : 'لم يُربط بأي كشف بعد')),
+      h('div', { class: 'actions' }, reset, toggle));
+    reset.addEventListener('click', () => {
+      const inp = h('input', { class: 'ltr', maxlength: '128', placeholder: 'كلمة المرور الجديدة', autocomplete: 'new-password' });
+      const save = h('button', { class: 'btn small', type: 'button' }, 'حفظ');
+      save.addEventListener('click', async () => {
+        save.disabled = true;
+        try {
+          await api('PATCH', '/api/users/' + u.id, { password: inp.value });
+          toast(`تغيّرت كلمة مرور ${u.name}`);
+          renderAll();
+        } catch (ex) { toast(ex.message); save.disabled = false; }
+      });
+      reset.replaceWith(h('div', { class: 'actions' }, inp, save));
+      inp.focus();
+    });
+    toggle.addEventListener('click', async () => {
+      toggle.disabled = true;
+      try {
+        const { user } = await api('PATCH', '/api/users/' + u.id, { disabled: !u.disabled });
+        Object.assign(u, user);
+        toast(user.disabled ? `أُوقف ${u.name}` : `فُعّل ${u.name}`);
+        renderAll();
+      } catch (ex) { toast(ex.message); toggle.disabled = false; }
+    });
+    return row;
+  });
+
+  return h('div', { style: 'display:grid;gap:18px' },
+    h('section', { class: 'card' }, h('h2', null, 'إضافة فرد'), form),
+    h('section', { class: 'card' }, h('h2', null, 'أفراد العائلة'),
+      h('p', { class: 'note' }, 'بعد الإضافة افتح الدفتر، ثم كشف الاسم، واختر من يراه من القائمة.'),
+      h('div', { class: 'users-list' }, rows.length ? rows : h('p', { class: 'note' }, 'لم تُضف أحدًا بعد.'))));
+}
+
+// ---------------------------------------------------------------- الدخول وكلمة المرور
+function renderLogin() {
+  document.getElementById('who').hidden = true;
+  document.getElementById('tabs').hidden = true;
+  const err = h('p', { class: 'form-error', role: 'alert' });
+  const user = h('input', { id: 'l-user', class: 'ltr', autocapitalize: 'none', autocomplete: 'username', required: true });
+  const pw = h('input', { id: 'l-pw', class: 'ltr', type: 'password', autocomplete: 'current-password', required: true });
+  const btn = h('button', { class: 'btn', type: 'submit' }, 'دخول');
+  const form = h('form', {
+    novalidate: true,
+    onsubmit: async (e) => {
+      e.preventDefault();
+      err.textContent = '';
+      btn.disabled = true;
+      try {
+        await api('POST', '/api/login', { username: user.value, password: pw.value });
+        await start();
+      } catch (ex) {
+        err.textContent = ex.message;
+        btn.disabled = false;
+      }
+    },
+  },
+  h('label', { for: 'l-user' }, 'اسم المستخدم', user),
+  h('label', { for: 'l-pw' }, 'كلمة المرور', pw),
+  err, btn);
+  document.getElementById('app').replaceChildren(h('section', { class: 'card login' }, h('h2', null, 'تسجيل الدخول'), form));
+  user.focus();
+}
+
+function withPw(parts) {
+  if (!state.showPw) return parts;
+  const err = h('p', { class: 'form-error', role: 'alert' });
+  const cur = h('input', { id: 'p-cur', class: 'ltr', type: 'password', autocomplete: 'current-password' });
+  const next = h('input', { id: 'p-new', class: 'ltr', type: 'password', autocomplete: 'new-password', placeholder: '8 أحرف على الأقل' });
+  const btn = h('button', { class: 'btn', type: 'submit' }, 'حفظ');
+  const cancel = h('button', { class: 'btn ghost', type: 'button', onclick: () => { state.showPw = false; renderAll(); } }, 'إلغاء');
+  const form = h('form', {
+    class: 'entry', novalidate: true,
+    onsubmit: async (e) => {
+      e.preventDefault();
+      err.textContent = '';
+      btn.disabled = true;
+      try {
+        await api('POST', '/api/password', { current: cur.value, next: next.value });
+        state.showPw = false;
+        toast('تغيّرت كلمة المرور');
+        renderAll();
+      } catch (ex) { err.textContent = ex.message; btn.disabled = false; }
+    },
+  },
+  h('label', { for: 'p-cur' }, 'كلمة المرور الحالية', cur),
+  h('label', { for: 'p-new' }, 'الجديدة', next),
+  h('div', { class: 'full' }, err), btn, cancel);
+  return [h('section', { class: 'card' }, h('h2', null, 'تغيير كلمة المرور'), form), ...parts];
+}
+
+document.getElementById('btn-pw').addEventListener('click', () => { state.showPw = !state.showPw; renderAll(); window.scrollTo(0, 0); });
+document.getElementById('btn-out').addEventListener('click', async () => {
+  try { await api('POST', '/api/logout'); } catch { /* نكمل */ }
+  Object.assign(state, { me: null, ledgers: [], members: [], tx: [], users: [], current: null, showPw: false });
+  renderLogin();
+});
+
 // ---------------------------------------------------------------- البدء
 async function start() {
   try {
     const data = await api('GET', '/api/data');
-    Object.assign(state, data);
-    document.getElementById('who-email').textContent = data.me.email;
+    Object.assign(state, { users: [] }, data);
+    document.getElementById('who-name').textContent = data.me.name;
+    document.getElementById('who').hidden = false;
     state.current = state.ledgers[0] ? state.ledgers[0].id : null;
     renderAll();
   } catch (ex) {
-    document.getElementById('app').replaceChildren(h('p', { class: 'state' }, ex.message));
+    if (!document.querySelector('.login')) document.getElementById('app').replaceChildren(h('p', { class: 'state' }, ex.message));
   }
 }
 start();

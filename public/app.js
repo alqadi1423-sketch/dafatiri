@@ -445,8 +445,6 @@ function pagePerson(id) {
   if (!p) return notFound();
   const ms = S.members.filter((m) => m.person_id === p.id);
   const nm = h('input', { maxlength: '40', value: p.name });
-  const others = S.people.filter((x) => x.id !== p.id);
-  const into = h('select', null, h('option', { value: '' }, 'اختر'), others.map((x) => h('option', { value: String(x.id) }, x.name)));
   return [
     pageHead({ back: ['#/people', 'الأشخاص'], title: p.name }),
     h('section', { class: 'card list' }, h('h3', null, 'حساباته'),
@@ -463,15 +461,55 @@ function pagePerson(id) {
         toast('حُفظ الاسم');
         render();
       }, { ghost: true }),
-      h('p', { class: 'note' }, 'إن كان هذا الشخص مكررًا باسم آخر، ادمجه في السجل الصحيح فتنتقل إليه كل حساباته.'),
-      form([field('pp-into', 'دمجه في', into, true)], 'دمج', async () => {
-        if (!into.value) throw new Error('اختر الشخص');
-        const { merged } = await api('PATCH', '/api/people/' + p.id, { merge_into: Number(into.value) });
+      mergePicker(p)),
+  ];
+}
+
+// الدمج: قائمة بكل الأشخاص مع دفاترهم، وبحث سريع، وتأكيد قبل التنفيذ
+function mergePicker(p) {
+  const ledgersOfPerson = (id) => S.members.filter((m) => m.person_id === id).map((m) => m.ledger_id);
+  const mine = new Set(ledgersOfPerson(p.id));
+  const others = S.people.filter((x) => x.id !== p.id).sort((a, b) => a.name.localeCompare(b.name, 'ar'));
+  const search = h('input', { type: 'search', placeholder: 'ابحث بالاسم', autocomplete: 'off', 'aria-label': 'بحث' });
+  const list = h('div', { class: 'pick-list' });
+  const confirm = h('div', { class: 'pick-confirm' });
+  let chosen = null;
+
+  const draw = () => {
+    const q = search.value.trim();
+    list.replaceChildren(...others.filter((x) => !q || x.name.includes(q)).map((x) => {
+      const theirs = ledgersOfPerson(x.id);
+      const clash = theirs.find((lid) => mine.has(lid));
+      const names = theirs.map((lid) => (ledgerOf(lid) || {}).name).filter(Boolean).join('، ') || 'بلا حسابات';
+      return h('button', {
+        type: 'button', class: 'pick' + (chosen === x.id ? ' on' : ''), disabled: !!clash,
+        onclick: () => { chosen = x.id; draw(); showConfirm(x); },
+      }, h('span', { class: 'pick-name' }, x.name),
+      h('span', { class: 'pick-sub' }, clash ? `لا يُدمج: لكليهما حساب في «${ledgerOf(clash).name}»` : names));
+    }));
+    if (!list.children.length) list.append(h('p', { class: 'empty' }, 'لا نتائج.'));
+  };
+  const showConfirm = (x) => {
+    const btn = h('button', { class: 'btn', type: 'button' }, 'دمج');
+    btn.addEventListener('click', async () => {
+      btn.disabled = true;
+      try {
+        const { merged } = await api('PATCH', '/api/people/' + p.id, { merge_into: x.id });
         await load();
         toast('تم الدمج');
         go('#/p/' + merged);
-      }, { ghost: true })),
-  ];
+      } catch (ex) { toast(ex.message); btn.disabled = false; }
+    });
+    confirm.replaceChildren(
+      h('p', { class: 'confirm' }, `تنتقل كل حسابات «${p.name}» إلى «${x.name}»، ويُحذف سجل «${p.name}».`),
+      h('div', { class: 'actions' }, btn, h('button', { class: 'btn ghost', type: 'button', onclick: () => { chosen = null; confirm.replaceChildren(); draw(); } }, 'إلغاء')));
+  };
+  search.addEventListener('input', draw);
+  draw();
+  return h('div', { class: 'merge' },
+    h('h4', { class: 'sub-h' }, 'الدمج'),
+    h('p', { class: 'note' }, `إن كان «${p.name}» مكررًا باسم آخر، اختر سجله الصحيح من القائمة.`),
+    search, list, confirm);
 }
 
 function accessCard(p) {

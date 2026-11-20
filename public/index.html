@@ -13,23 +13,16 @@
 </head>
 <body>
 <header class="top">
-  <div class="brand">
-    <span class="mark" aria-hidden="true"></span>
-    <h1>دفاتري</h1>
-  </div>
-  <div class="who" id="who" hidden>
-    <span id="who-name"></span>
-    <button type="button" class="linkish" id="btn-pw">كلمة المرور</button>
-    <button type="button" class="linkish" id="btn-out">خروج</button>
+  <div class="top-in">
+    <a class="brand" href="#/"><span class="mark" aria-hidden="true"></span><span>دفاتري</span></a>
+    <nav class="who" id="who" hidden aria-label="الحساب">
+      <span id="who-name"></span>
+      <a href="#/password">كلمة المرور</a>
+      <button type="button" class="linkish" id="btn-out">خروج</button>
+    </nav>
   </div>
 </header>
-
-<nav id="tabs" class="tabs" aria-label="الدفاتر"></nav>
-
-<main id="app">
-  <p class="state" id="state">جارِ التحميل…</p>
-</main>
-
+<main id="app"><p class="empty">جارِ التحميل…</p></main>
 <div id="toast" class="toast" role="status" aria-live="polite"></div>
 <script src="/app.js" defer></script>
 </body>

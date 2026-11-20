@@ -1,6 +1,7 @@
 'use strict';
 
-const state = { me: null, ledgers: [], members: [], tx: [], users: [], current: null, openMember: null, showPw: false };
+// ================================================================ الحالة والأدوات
+const S = { me: null, ledgers: [], people: [], members: [], tx: [], users: [], invites: [] };
 
 const fmt = new Intl.NumberFormat('en-US', { maximumFractionDigits: 2 });
 const money = (h) => fmt.format(h / 100);
@@ -20,7 +21,7 @@ function h(tag, attrs, ...children) {
     else if (k === 'value') el.value = v;
     else el.setAttribute(k, v === true ? '' : v);
   }
-  for (const c of children.flat()) {
+  for (const c of children.flat(Infinity)) {
     if (c === null || c === undefined || c === false) continue;
     el.append(c instanceof Node ? c : document.createTextNode(String(c)));
   }
@@ -36,6 +37,7 @@ function toast(msg) {
   toastTimer = setTimeout(() => t.classList.remove('show'), 2600);
 }
 
+class AuthError extends Error {}
 async function api(method, path, body) {
   const res = await fetch(path, {
     method,
@@ -45,204 +47,290 @@ async function api(method, path, body) {
   });
   let data = null;
   try { data = await res.json(); } catch { /* فارغ */ }
-  if (!res.ok) {
-    if (res.status === 401 && path !== '/api/login') { renderLogin(); throw new Error('سجّل الدخول من جديد.'); }
-    throw new Error((data && data.error) || 'تعذّر الاتصال، حاول مرة أخرى.');
-  }
+  if (res.status === 401 && path !== '/api/login') throw new AuthError('سجّل الدخول');
+  if (!res.ok) throw new Error((data && data.error) || 'تعذّر الاتصال، حاول مرة أخرى.');
   return data;
 }
 
-// ---------------------------------------------------------------- الحساب
-function ledgerOf(id) { return state.ledgers.find((l) => l.id === id); }
-function signOf(ledger, col) {
-  const c = ledger.config.cols.find((x) => x.key === col);
-  return c ? c.sign : 0;
+async function copyText(text) {
+  try {
+    await navigator.clipboard.writeText(text);
+    return true;
+  } catch {
+    const ta = h('textarea', { style: 'position:fixed;opacity:0' }, text);
+    document.body.append(ta);
+    ta.select();
+    let ok = false;
+    try { ok = document.execCommand('copy'); } catch { /* */ }
+    ta.remove();
+    return ok;
+  }
 }
-function accountTotals(ledger, memberId) {
+const waLink = (text) => 'https://wa.me/?text=' + encodeURIComponent(text);
+
+// ================================================================ الحساب
+const ledgerOf = (id) => S.ledgers.find((l) => l.id === id);
+const memberOf = (id) => S.members.find((m) => m.id === id);
+const personOf = (id) => S.people.find((p) => p.id === id);
+const membersOf = (ledger) => S.members.filter((m) => m.ledger_id === ledger.id)
+  .sort((a, b) => a.sort - b.sort || a.id - b.id);
+const nameOfMember = (m) => (personOf(m.person_id) || {}).name || '';
+const signOf = (ledger, col) => (ledger.config.cols.find((c) => c.key === col) || {}).sign || 0;
+const txOf = (m) => S.tx.filter((t) => t.member_id === m.id);
+
+function totalsOf(ledger, members) {
   const totals = Object.fromEntries(ledger.config.cols.map((c) => [c.key, 0]));
   let balance = 0;
-  for (const t of state.tx) {
-    if (t.member_id !== memberId) continue;
+  const ids = new Set(members.map((m) => m.id));
+  for (const t of S.tx) {
+    if (!ids.has(t.member_id)) continue;
     totals[t.col] = (totals[t.col] || 0) + t.amount;
     balance += signOf(ledger, t.col) * t.amount;
   }
   return { totals, balance };
 }
-function ledgerTotals(ledger, members) {
-  const totals = Object.fromEntries(ledger.config.cols.map((c) => [c.key, 0]));
-  let balance = 0;
-  for (const m of members) {
-    const a = accountTotals(ledger, m.id);
-    for (const k in a.totals) totals[k] += a.totals[k];
-    balance += a.balance;
-  }
-  return { totals, balance };
+
+function ledgerSummaryText(ledger) {
+  const ms = membersOf(ledger);
+  const lines = ms.map((m) => `${nameOfMember(m)} ${money(totalsOf(ledger, [m]).balance)}`);
+  return [ledger.name, ...lines, '---', `المجموع ${money(totalsOf(ledger, ms).balance)}`].join('\n');
 }
 
-// ---------------------------------------------------------------- العرض
-function renderTabs() {
-  const nav = document.getElementById('tabs');
-  const tabs = state.ledgers.map((l) => [l.id, l.name]);
-  if (state.me && state.me.isOwner) tabs.push(['__new', '+ دفتر'], ['__family', 'أفراد العائلة']);
-  nav.replaceChildren(...tabs.map(([id, label]) =>
-    h('button', {
-      class: 'tab', role: 'tab', type: 'button',
-      'aria-selected': String(id === state.current),
-      onclick: () => { state.current = id; state.openMember = null; renderAll(); },
-    }, label)));
-  nav.hidden = tabs.length < 2;
+// ================================================================ عناصر مشتركة
+const balClass = (b) => 'num' + (b === 0 ? ' zero' : b < 0 ? ' neg' : '');
+
+function pageHead({ back, title, sub, badge }) {
+  return h('div', { class: 'page-head' },
+    back ? h('a', { class: 'back', href: back[0] }, '‹ ', back[1]) : null,
+    h('h2', { class: 'title' }, title, badge ? h('span', { class: 'badge' }, badge) : null),
+    sub ? h('p', { class: 'sub' }, sub) : null);
 }
 
-function renderAll() {
-  renderTabs();
-  const app = document.getElementById('app');
-  if (state.current === '__family') { app.replaceChildren(...withPw([renderFamily()])); return; }
-  if (state.current === '__new') { app.replaceChildren(...withPw([renderNewLedger()])); return; }
-  const ledger = ledgerOf(state.current);
-  if (!ledger) {
-    app.replaceChildren(h('p', { class: 'state' },
-      state.me.isOwner ? 'لا توجد دفاتر بعد.' :
-        'لا توجد حسابات مربوطة بك بعد. اطلب من صاحب الدفاتر ربطها باسمك.'));
-    return;
-  }
-  const members = state.members.filter((m) => m.ledger_id === ledger.id);
-  const parts = [renderSummary(ledger, members)];
-  if (state.me.isOwner) parts.push(renderEntry(ledger, members));
-  parts.push(renderAccounts(ledger, members));
-  if (state.me.isOwner) parts.push(renderAddMember(ledger), renderLedgerSettings(ledger));
-  app.replaceChildren(...withPw(parts));
+function summaryCard(ledger, members, label) {
+  const { totals, balance } = totalsOf(ledger, members);
+  return h('section', { class: 'card summary' },
+    h('div', { class: 'big-label' }, label),
+    h('div', { class: 'big ' + balClass(balance) }, money(balance), h('small', null, 'ريال')),
+    h('div', { class: 'tiles' }, ledger.config.cols.map((c) =>
+      h('div', { class: 'tile' }, h('span', null, c.label), h('b', { class: 'num' }, money(totals[c.key]))))));
 }
 
-function balanceClass(b) { return b === 0 ? 'zero' : b < 0 ? 'neg' : ''; }
-
-function renderSummary(ledger, members) {
-  const { totals, balance } = ledgerTotals(ledger, members);
-  const title = state.me.isOwner ? ledger.config.balanceLabel : (members.length > 1 ? 'إجمالي حساباتك' : ledger.config.balanceLabel);
-  return h('section', { class: 'card summary', 'aria-label': 'الملخص' },
-    h('div', { class: 'big-label' }, title),
-    h('div', { class: 'big ' + balanceClass(balance) }, money(balance), h('small', null, ' ريال')),
-    h('div', { class: 'cols' },
-      ledger.config.cols.map((c) => h('div', null, h('span', null, c.label), h('span', null, money(totals[c.key])))),
-      h('div', null, h('span', null, 'عدد الحسابات'), h('span', null, members.length))));
+function card(title, ...body) {
+  return h('section', { class: 'card' }, title ? h('h3', null, title) : null, ...body);
 }
 
-function renderEntry(ledger, members) {
+function field(id, label, input, full) {
+  input.id = id;
+  return h('label', { class: full ? 'full' : null, for: id }, h('span', null, label), input);
+}
+
+// نموذج عام: يعطّل الزر أثناء الإرسال ويعرض الخطأ تحته
+function form(fields, submitLabel, onSubmit, opts = {}) {
   const err = h('p', { class: 'form-error', role: 'alert' });
-  const memberSel = h('select', { id: 'f-member', required: true },
-    h('option', { value: '' }, 'اختر الاسم'),
-    members.map((m) => h('option', { value: String(m.id) }, m.name + (m.role_label ? ` (${m.role_label})` : ''))));
-  if (state.openMember && members.some((m) => m.id === state.openMember)) memberSel.value = String(state.openMember);
-  const itemSel = h('select', { id: 'f-item', required: true },
-    ledger.config.items.filter((it) => it.label !== 'رصيد افتتاحي').concat(ledger.config.items.filter((it) => it.label === 'رصيد افتتاحي'))
-      .map((it) => h('option', { value: it.label }, it.label)));
-  const amount = h('input', { id: 'f-amount', inputmode: 'decimal', autocomplete: 'off', placeholder: '0', required: true });
-  const date = h('input', { id: 'f-date', type: 'date', value: today(), required: true });
-  const note = h('input', { id: 'f-note', maxlength: '200', placeholder: 'اختياري' });
-  const btn = h('button', { class: 'btn full', type: 'submit' }, 'حفظ الحركة');
-
-  const form = h('form', {
-    class: 'entry', novalidate: true,
+  const btn = h('button', { class: 'btn' + (opts.ghost ? ' ghost' : ''), type: 'submit' }, submitLabel);
+  return h('form', {
+    class: 'form' + (opts.single ? ' single' : ''), novalidate: true,
     onsubmit: async (e) => {
       e.preventDefault();
       err.textContent = '';
-      const amt = amount.value.trim().replace(/[٠-٩]/g, (d) => '٠١٢٣٤٥٦٧٨٩'.indexOf(d)).replace(/[,٬]/g, '').replace('٫', '.');
-      if (!memberSel.value) { err.textContent = 'اختر الاسم.'; return; }
-      if (!/^\d+(\.\d{1,2})?$/.test(amt) || Number(amt) <= 0) { err.textContent = 'اكتب مبلغًا صحيحًا أكبر من صفر.'; return; }
       btn.disabled = true;
-      try {
-        const { tx } = await api('POST', '/api/tx', {
-          member_id: Number(memberSel.value), item: itemSel.value, amount: amt, date: date.value, note: note.value,
-        });
-        state.tx.push(tx);
-        state.openMember = tx.member_id;
-        const m = state.members.find((x) => x.id === tx.member_id);
-        toast(`سُجّل ${tx.item} ${money(tx.amount)} ريال على ${m ? m.name : ''}`);
-        renderAll();
-      } catch (ex) {
+      try { await onSubmit(); } catch (ex) {
+        if (ex instanceof AuthError) return showLogin();
         err.textContent = ex.message;
-      } finally {
-        btn.disabled = false;
-      }
+      } finally { btn.disabled = false; }
     },
-  },
-  h('label', { class: 'full', for: 'f-member' }, 'الاسم', memberSel),
-  h('label', { for: 'f-item' }, 'البند', itemSel),
-  h('label', { for: 'f-amount' }, 'المبلغ (ريال)', amount),
-  h('label', { for: 'f-date' }, 'التاريخ', date),
-  h('label', { for: 'f-note' }, 'ملاحظة', note),
-  h('div', { class: 'full' }, err),
-  btn);
-
-  return h('section', { class: 'card', 'aria-label': 'تسجيل حركة' }, h('h2', null, 'تسجيل حركة'), form);
+  }, fields, h('div', { class: 'full' }, err), h('div', { class: 'full form-actions' }, btn));
 }
 
-function renderAccounts(ledger, members) {
-  const list = members.map((m) => {
-    const { totals, balance } = accountTotals(ledger, m.id);
-    const used = ledger.config.cols.filter((c) => totals[c.key]);
-    const sub = used.length > 1 ? used.map((c) => `${c.label} ${money(totals[c.key])}`).join('، ') : '';
-    const det = h('details', { class: 'acct', open: state.openMember === m.id || !state.me.isOwner },
-      h('summary', null,
-        h('span', { class: 'name' }, m.name, m.role_label ? h('span', { class: 'role' }, m.role_label) : null),
-        h('span', { class: 'bal ' + balanceClass(balance) }, money(balance)),
-        sub ? h('span', { class: 'sub' }, sub) : null),
-      renderStatement(ledger, m));
-    det.addEventListener('toggle', () => {
-      if (det.open) state.openMember = m.id;
-      else if (state.openMember === m.id) state.openMember = null;
-      const sel = document.getElementById('f-member');
-      if (sel && det.open) sel.value = String(m.id);
-    });
-    return det;
-  });
-  return h('section', { class: 'card accounts', 'aria-label': 'الحسابات' },
-    h('h2', null, state.me.isOwner ? 'الحسابات' : 'كشف حسابك'), list);
+function rowLink(href, main, side, sub) {
+  return h('a', { class: 'row', href },
+    h('div', { class: 'row-main' }, main, sub ? h('div', { class: 'row-sub' }, sub) : null),
+    h('div', { class: 'row-side' }, side),
+    h('span', { class: 'chev', 'aria-hidden': 'true' }));
 }
 
-function renderStatement(ledger, m) {
-  const rows = state.tx.filter((t) => t.member_id === m.id);
+// ================================================================ الصفحات
+function pageHome() {
+  if (!S.me.isOwner) {
+    const ms = S.members;
+    if (!ms.length) return [pageHead({ title: 'حساباتي' }), h('p', { class: 'empty' }, 'لا توجد حسابات ظاهرة لك بعد.')];
+    return [
+      pageHead({ title: 'حساباتي' }),
+      h('section', { class: 'card list' }, ms.map((m) => {
+        const l = ledgerOf(m.ledger_id);
+        const b = totalsOf(l, [m]).balance;
+        return rowLink('#/a/' + m.id, l.name, h('span', { class: balClass(b) }, money(b)));
+      })),
+    ];
+  }
+  return [
+    pageHead({ title: 'الدفاتر' }),
+    S.ledgers.length
+      ? h('div', { class: 'ledger-grid' }, S.ledgers.map((l) => {
+        const ms = membersOf(l);
+        const b = totalsOf(l, ms).balance;
+        return h('a', { class: 'card ledger-card', href: '#/l/' + l.id },
+          h('div', { class: 'lc-top' }, h('span', { class: 'lc-name' }, l.name), l.private ? h('span', { class: 'badge' }, 'خاص') : null),
+          h('div', { class: 'lc-bal ' + balClass(b) }, money(b), h('small', null, 'ريال')),
+          h('div', { class: 'lc-meta' }, `${ms.length} ${ms.length === 1 ? 'حساب' : 'حسابات'}`, ' · ', l.config.balanceLabel));
+      }))
+      : h('p', { class: 'empty' }, 'لا توجد دفاتر بعد.'),
+    h('div', { class: 'actions' },
+      h('a', { class: 'btn', href: '#/new' }, 'دفتر جديد'),
+      h('a', { class: 'btn ghost', href: '#/people' }, `الأشخاص (${S.people.length})`)),
+  ];
+}
+
+function pageLedger(id) {
+  const ledger = ledgerOf(id);
+  if (!ledger) return notFound();
+  const ms = membersOf(ledger);
+  const out = [
+    pageHead({ back: ['#/', 'الدفاتر'], title: ledger.name, badge: ledger.private ? 'خاص' : null }),
+    summaryCard(ledger, ms, ledger.config.balanceLabel),
+    h('div', { class: 'actions' },
+      h('button', {
+        class: 'btn ghost', type: 'button',
+        onclick: async () => toast((await copyText(ledgerSummaryText(ledger))) ? 'نُسخت الخلاصة' : 'تعذّر النسخ'),
+      }, 'نسخ الخلاصة'),
+      h('a', { class: 'btn ghost', href: waLink(ledgerSummaryText(ledger)), target: '_blank', rel: 'noopener' }, 'إرسال واتساب')),
+    h('section', { class: 'card list' },
+      h('h3', null, 'الحسابات'),
+      ms.length ? ms.map((m) => {
+        const { totals, balance } = totalsOf(ledger, [m]);
+        const used = ledger.config.cols.filter((c) => totals[c.key]);
+        const sub = used.length > 1 ? used.map((c) => `${c.label} ${money(totals[c.key])}`).join('، ') : null;
+        return rowLink('#/a/' + m.id,
+          h('span', null, nameOfMember(m), m.role_label ? h('span', { class: 'tag' }, m.role_label) : null),
+          h('span', { class: balClass(balance) }, money(balance)), sub);
+      }) : h('p', { class: 'empty' }, 'لا توجد حسابات في هذا الدفتر بعد.')),
+  ];
+  if (S.me.isOwner) out.push(addMemberCard(ledger, ms), ledgerSettingsCard(ledger));
+  return out;
+}
+
+function addMemberCard(ledger, ms) {
+  const inLedger = new Set(ms.map((m) => m.person_id));
+  const choices = S.people.filter((p) => !inLedger.has(p.id));
+  const who = h('select', null,
+    h('option', { value: 'new' }, 'شخص جديد'),
+    choices.map((p) => h('option', { value: String(p.id) }, p.name)));
+  const name = h('input', { maxlength: '40', autocomplete: 'off' });
+  const role = h('input', { maxlength: '20', placeholder: 'اختياري' });
+  const nameField = field('am-name', 'اسم الشخص الجديد', name);
+  who.addEventListener('change', () => { nameField.hidden = who.value !== 'new'; });
+  return card('إضافة حساب لشخص',
+    form([field('am-who', 'الشخص', who), nameField, field('am-role', 'الصفة', role)], 'إضافة', async () => {
+      const body = { ledger_id: ledger.id, role_label: role.value };
+      if (who.value === 'new') body.name = name.value; else body.person_id = Number(who.value);
+      const { member, person } = await api('POST', '/api/members', body);
+      if (!personOf(person.id)) S.people.push(person);
+      S.members.push(member);
+      toast(`أُضيف ${person.name}`);
+      go('#/a/' + member.id);
+    }));
+}
+
+function ledgerSettingsCard(ledger) {
+  const name = h('input', { maxlength: '60', value: ledger.name });
+  const priv = privacySelect(ledger.private);
+  return h('details', { class: 'card settings' },
+    h('summary', null, 'إعدادات الدفتر'),
+    form([field('ls-name', 'اسم الدفتر', name), field('ls-priv', 'من يرى الدفتر', priv)], 'حفظ', async () => {
+      const { ledger: l } = await api('PATCH', '/api/ledgers/' + ledger.id, { name: name.value, private: priv.value === '1' });
+      Object.assign(ledger, l);
+      toast('حُفظت الإعدادات');
+      render();
+    }, { ghost: true }));
+}
+
+function privacySelect(isPrivate) {
+  const s = h('select', null,
+    h('option', { value: '0' }, 'أنا، وكل صاحب حساب يرى حسابه'),
+    h('option', { value: '1' }, 'أنا وحدي'));
+  s.value = isPrivate ? '1' : '0';
+  return s;
+}
+
+function pageAccount(id) {
+  const m = memberOf(Number(id));
+  if (!m) return notFound();
+  const ledger = ledgerOf(m.ledger_id);
+  const person = personOf(m.person_id) || { name: '' };
+  const out = [
+    pageHead({
+      back: S.me.isOwner ? ['#/l/' + ledger.id, ledger.name] : ['#/', 'حساباتي'],
+      title: person.name,
+      sub: [ledger.name, m.role_label].filter(Boolean).join(' · '),
+    }),
+    summaryCard(ledger, [m], ledger.config.balanceLabel),
+  ];
+  if (S.me.isOwner) out.push(entryCard(ledger, m));
+  out.push(statementCard(ledger, m));
+  if (S.me.isOwner) out.push(h('div', { class: 'actions' }, h('a', { class: 'btn ghost', href: '#/p/' + person.id }, 'سجل ' + person.name)));
+  return out;
+}
+
+function entryCard(ledger, m) {
+  const items = [...ledger.config.items.filter((i) => i.label !== 'رصيد افتتاحي'), ...ledger.config.items.filter((i) => i.label === 'رصيد افتتاحي')];
+  const item = h('select', null, items.map((i) => h('option', { value: i.label }, i.label)));
+  const amount = h('input', { inputmode: 'decimal', autocomplete: 'off', placeholder: '0' });
+  const date = h('input', { type: 'date', value: today() });
+  const note = h('input', { maxlength: '200', placeholder: 'اختياري' });
+  return card('تسجيل حركة',
+    form([field('e-item', 'البند', item), field('e-amount', 'المبلغ (ريال)', amount),
+      field('e-date', 'التاريخ', date), field('e-note', 'ملاحظة', note)], 'حفظ الحركة', async () => {
+      const amt = amount.value.trim().replace(/[٠-٩]/g, (d) => '٠١٢٣٤٥٦٧٨٩'.indexOf(d)).replace(/[,٬]/g, '').replace('٫', '.');
+      if (!/^\d+(\.\d{1,2})?$/.test(amt) || Number(amt) <= 0) throw new Error('اكتب مبلغًا صحيحًا أكبر من صفر.');
+      const { tx } = await api('POST', '/api/tx', { member_id: m.id, item: item.value, amount: amt, date: date.value, note: note.value });
+      S.tx.push(tx);
+      toast(`سُجّل ${tx.item} ${money(tx.amount)} ريال`);
+      render();
+    }));
+}
+
+function statementCard(ledger, m) {
+  const rows = txOf(m);
   let running = 0;
   const body = rows.map((t) => {
     const sign = signOf(ledger, t.col);
     running += sign * t.amount;
-    const del = state.me.isOwner ? deleteButton(t) : null;
     return h('tr', null,
       h('td', { class: 'date' }, t.date),
-      h('td', null, h('span', { class: 'pill ' + (sign > 0 ? 'plus' : 'minus') }, t.item),
-        t.note ? h('div', { class: 'note' }, t.note) : null),
+      h('td', null, h('span', { class: 'pill ' + (sign > 0 ? 'plus' : 'minus') }, t.item), t.note ? h('div', { class: 'note' }, t.note) : null),
       h('td', { class: 'num' }, (sign > 0 ? '+' : '−') + money(t.amount)),
       h('td', { class: 'num' }, money(running)),
-      state.me.isOwner ? h('td', null, del) : null);
+      S.me.isOwner ? h('td', { class: 'act' }, deleteButton(t)) : null);
   });
-  const table = rows.length
-    ? h('div', { class: 'stmt-scroll' }, h('table', null,
+  return h('section', { class: 'card flush' },
+    h('h3', null, 'كشف الحساب'),
+    rows.length ? h('div', { class: 'table-wrap' }, h('table', null,
       h('thead', null, h('tr', null, h('th', null, 'التاريخ'), h('th', null, 'البند'), h('th', null, 'المبلغ'), h('th', null, 'الرصيد'),
-        state.me.isOwner ? h('th', null, '') : null)),
-      h('tbody', null, body)))
-    : h('p', { class: 'note' }, 'لا توجد حركات.');
-  return h('div', { class: 'stmt' }, table, state.me.isOwner && !ledger.private ? linkUser(m) : null);
+        S.me.isOwner ? h('th', null, '') : null)),
+      h('tbody', null, body))) : h('p', { class: 'empty' }, 'لا توجد حركات.'));
 }
 
 function deleteButton(t) {
-  const b = h('button', { class: 'btn ghost small del', type: 'button', 'aria-label': 'حذف الحركة' }, '×');
+  const b = h('button', { class: 'icon-btn', type: 'button', 'aria-label': 'حذف الحركة' }, '×');
   let armed = false;
   let timer;
   b.addEventListener('click', async () => {
     if (!armed) {
       armed = true;
       b.textContent = 'حذف؟';
-      b.className = 'btn danger small del';
-      timer = setTimeout(() => { armed = false; b.textContent = '×'; b.className = 'btn ghost small del'; }, 4000);
+      b.classList.add('armed');
+      timer = setTimeout(() => { armed = false; b.textContent = '×'; b.classList.remove('armed'); }, 4000);
       return;
     }
     clearTimeout(timer);
     b.disabled = true;
     try {
       await api('DELETE', '/api/tx/' + t.id);
-      state.tx = state.tx.filter((x) => x.id !== t.id);
+      S.tx = S.tx.filter((x) => x.id !== t.id);
       toast('حُذفت الحركة');
-      renderAll();
+      render();
     } catch (ex) {
+      if (ex instanceof AuthError) return showLogin();
       toast(ex.message);
       b.disabled = false;
     }
@@ -250,264 +338,234 @@ function deleteButton(t) {
   return b;
 }
 
-function linkUser(m) {
-  const id = 'link-' + m.id;
-  const sel = h('select', { id },
-    h('option', { value: '' }, 'غير مربوط'),
-    (state.users || []).filter((u) => !u.is_owner).map((u) =>
-      h('option', { value: String(u.id) }, u.name + ' (' + u.username + ')' + (u.disabled ? ' موقوف' : ''))));
-  sel.value = m.user_id ? String(m.user_id) : '';
-  sel.addEventListener('change', async () => {
-    sel.disabled = true;
+function pagePeople() {
+  const name = h('input', { maxlength: '40', autocomplete: 'off' });
+  return [
+    pageHead({ back: ['#/', 'الدفاتر'], title: 'الأشخاص' }),
+    h('section', { class: 'card list' },
+      S.people.length ? S.people.map((p) => {
+        const n = S.members.filter((m) => m.person_id === p.id).length;
+        return rowLink('#/p/' + p.id, p.name, linkChip(p), `${n} ${n === 1 ? 'حساب' : 'حسابات'}`);
+      }) : h('p', { class: 'empty' }, 'لا يوجد أشخاص بعد.')),
+    card('شخص جديد', form([field('np-name', 'الاسم', name, true)], 'إضافة', async () => {
+      const { person } = await api('POST', '/api/people', { name: name.value });
+      S.people.push(person);
+      go('#/p/' + person.id);
+    })),
+  ];
+}
+
+function linkChip(p) {
+  if (p.user_id) {
+    const u = S.users.find((x) => x.id === p.user_id);
+    return h('span', { class: 'chip ok' }, u && u.disabled ? 'موقوف' : 'مرتبط');
+  }
+  if (S.invites.some((i) => i.person_id === p.id)) return h('span', { class: 'chip wait' }, 'دعوة مرسلة');
+  return h('span', { class: 'chip' }, 'غير مرتبط');
+}
+
+function pagePerson(id) {
+  const p = personOf(Number(id));
+  if (!p) return notFound();
+  const ms = S.members.filter((m) => m.person_id === p.id);
+  const nm = h('input', { maxlength: '40', value: p.name });
+  const others = S.people.filter((x) => x.id !== p.id);
+  const into = h('select', null, h('option', { value: '' }, 'اختر'), others.map((x) => h('option', { value: String(x.id) }, x.name)));
+  return [
+    pageHead({ back: ['#/people', 'الأشخاص'], title: p.name }),
+    h('section', { class: 'card list' }, h('h3', null, 'حساباته'),
+      ms.length ? ms.map((m) => {
+        const l = ledgerOf(m.ledger_id);
+        const b = totalsOf(l, [m]).balance;
+        return rowLink('#/a/' + m.id, l.name, h('span', { class: balClass(b) }, money(b)), l.private ? 'دفتر خاص، لا يظهر له' : null);
+      }) : h('p', { class: 'empty' }, 'لا حسابات له بعد. أضفه من صفحة أي دفتر.')),
+    accessCard(p),
+    h('details', { class: 'card settings' }, h('summary', null, 'تعديل الاسم والدمج'),
+      form([field('pp-name', 'الاسم', nm, true)], 'حفظ الاسم', async () => {
+        const { person } = await api('PATCH', '/api/people/' + p.id, { name: nm.value });
+        Object.assign(p, person);
+        toast('حُفظ الاسم');
+        render();
+      }, { ghost: true }),
+      h('p', { class: 'note' }, 'إن كان هذا الشخص مكررًا باسم آخر، ادمجه في السجل الصحيح فتنتقل إليه كل حساباته.'),
+      form([field('pp-into', 'دمجه في', into, true)], 'دمج', async () => {
+        if (!into.value) throw new Error('اختر الشخص');
+        const { merged } = await api('PATCH', '/api/people/' + p.id, { merge_into: Number(into.value) });
+        await load();
+        toast('تم الدمج');
+        go('#/p/' + merged);
+      }, { ghost: true })),
+  ];
+}
+
+function accessCard(p) {
+  if (p.user_id) {
+    const u = S.users.find((x) => x.id === p.user_id) || {};
+    const pw = h('input', { class: 'ltr', maxlength: '128', autocomplete: 'new-password', placeholder: '8 أحرف على الأقل' });
+    return card('حساب الدخول',
+      h('div', { class: 'kv' }, h('span', null, 'اسم المستخدم'), h('b', { class: 'ltr-text' }, u.username || '')),
+      h('p', { class: 'note' }, 'يرى حساباته في الدفاتر غير الخاصة فقط، ولا يقدر يعدّل شيئًا.'),
+      form([field('ac-pw', 'كلمة مرور جديدة له', pw, true)], 'تعيين', async () => {
+        await api('PATCH', '/api/users/' + p.user_id, { password: pw.value });
+        pw.value = '';
+        toast('تغيّرت كلمة مروره');
+      }, { ghost: true }),
+      h('div', { class: 'actions' }, h('button', {
+        class: 'btn ghost danger-text', type: 'button',
+        onclick: async () => {
+          try {
+            await api('POST', `/api/people/${p.id}/unlink`);
+            await load();
+            toast('فُصل الحساب');
+            render();
+          } catch (ex) { toast(ex.message); }
+        },
+      }, 'فصل الحساب وإيقافه')));
+  }
+  const box = h('div', { class: 'invite-box' });
+  const pending = S.invites.find((i) => i.person_id === p.id);
+  const btn = h('button', { class: 'btn', type: 'button' }, pending ? 'إنشاء رابط جديد' : 'إنشاء رابط دعوة');
+  btn.addEventListener('click', async () => {
+    btn.disabled = true;
     try {
-      const { member } = await api('PATCH', '/api/members/' + m.id, { user_id: sel.value ? Number(sel.value) : null });
-      Object.assign(m, member);
-      toast(member.user_id ? `رُبط حساب ${m.name}` : `فُكّ ربط حساب ${m.name}`);
-    } catch (ex) {
-      toast(ex.message);
-      sel.value = m.user_id ? String(m.user_id) : '';
-    } finally {
-      sel.disabled = false;
-    }
+      const { url, expires_at: exp } = await api('POST', `/api/people/${p.id}/invite`);
+      S.invites = S.invites.filter((i) => i.person_id !== p.id).concat({ person_id: p.id, expires_at: exp });
+      const msg = `مرحبًا ${p.name}\nهذا رابط دخولك إلى دفاتري، يعمل مرة واحدة خلال 14 يومًا:\n${url}`;
+      box.replaceChildren(
+        h('input', { class: 'ltr', readonly: true, value: url, onclick: (ev) => ev.target.select() }),
+        h('div', { class: 'actions' },
+          h('button', { class: 'btn ghost', type: 'button', onclick: async () => toast((await copyText(url)) ? 'نُسخ الرابط' : 'تعذّر النسخ') }, 'نسخ الرابط'),
+          h('a', { class: 'btn ghost', href: waLink(msg), target: '_blank', rel: 'noopener' }, 'إرسال واتساب')));
+    } catch (ex) { toast(ex.message); } finally { btn.disabled = false; }
   });
-  return h('div', { class: 'link-row' }, h('label', { for: id }, 'من يرى هذا الكشف من العائلة', sel));
+  return card('حساب الدخول',
+    h('p', { class: 'note' }, pending
+      ? 'أُرسلت له دعوة لم تُستخدم بعد. إنشاء رابط جديد يلغي السابق.'
+      : 'غير مرتبط بحساب. أرسل له رابط دعوة لينشئ اسم مستخدم وكلمة مرور، فيرى حساباته فقط.'),
+    box,
+    h('div', { class: 'actions' }, btn));
 }
 
-function renderAddMember(ledger) {
-  const err = h('p', { class: 'form-error', role: 'alert' });
-  const name = h('input', { id: 'n-name', maxlength: '40', required: true });
-  const role = h('input', { id: 'n-role', maxlength: '20', placeholder: 'اختياري' });
-  const btn = h('button', { class: 'btn full', type: 'submit' }, 'فتح الحساب');
-  const form = h('form', {
-    class: 'entry', novalidate: true,
-    onsubmit: async (e) => {
-      e.preventDefault();
-      err.textContent = '';
-      if (!name.value.trim()) { err.textContent = 'اكتب الاسم.'; return; }
-      btn.disabled = true;
-      try {
-        const { member } = await api('POST', '/api/members', { ledger_id: ledger.id, name: name.value, role_label: role.value });
-        state.members.push(member);
-        state.openMember = member.id;
-        toast(`فُتح حساب ${member.name}`);
-        renderAll();
-      } catch (ex) {
-        err.textContent = ex.message;
-      } finally {
-        btn.disabled = false;
-      }
-    },
-  },
-  h('label', { for: 'n-name' }, 'الاسم', name),
-  h('label', { for: 'n-role' }, 'الصفة', role),
-  h('div', { class: 'full' }, err),
-  btn);
-  return h('section', { class: 'card', 'aria-label': 'فتح حساب جديد' }, h('h2', null, 'فتح حساب جديد في هذا الدفتر'), form);
-}
-
-// ---------------------------------------------------------------- الدفاتر (للمالك)
-const KIND_LABELS = { debts: 'ديون: دين وسداد وإبراء', fund: 'صندوق: إيداع وسحب' };
-
-function renderNewLedger() {
-  const err = h('p', { class: 'form-error', role: 'alert' });
-  const name = h('input', { id: 'g-name', maxlength: '60' });
-  const kind = h('select', { id: 'g-kind' }, Object.entries(KIND_LABELS).map(([k, v]) => h('option', { value: k }, v)));
-  const priv = h('select', { id: 'g-priv' }, h('option', { value: '0' }, 'يمكن ربط كشوفه بأفراد العائلة'), h('option', { value: '1' }, 'خاص بي وحدي'));
-  const btn = h('button', { class: 'btn full', type: 'submit' }, 'إنشاء الدفتر');
-  const form = h('form', {
-    class: 'entry', novalidate: true,
-    onsubmit: async (e) => {
-      e.preventDefault();
-      err.textContent = '';
-      btn.disabled = true;
-      try {
+function pageNewLedger() {
+  const name = h('input', { maxlength: '60', autocomplete: 'off' });
+  const kind = h('select', null, h('option', { value: 'debts' }, 'ديون: دين وسداد وإبراء'), h('option', { value: 'fund' }, 'صندوق: إيداع وسحب'));
+  const priv = privacySelect(false);
+  return [
+    pageHead({ back: ['#/', 'الدفاتر'], title: 'دفتر جديد' }),
+    card(null, form([field('nl-name', 'اسم الدفتر', name, true), field('nl-kind', 'النوع', kind), field('nl-priv', 'من يرى الدفتر', priv)],
+      'إنشاء الدفتر', async () => {
         const { ledger } = await api('POST', '/api/ledgers', { name: name.value, kind: kind.value, private: priv.value === '1' });
-        state.ledgers.push(ledger);
-        state.current = ledger.id;
-        toast(`أُنشئ ${ledger.name}`);
-        renderAll();
-      } catch (ex) { err.textContent = ex.message; btn.disabled = false; }
-    },
-  },
-  h('label', { class: 'full', for: 'g-name' }, 'اسم الدفتر', name),
-  h('label', { for: 'g-kind' }, 'النوع', kind),
-  h('label', { for: 'g-priv' }, 'الخصوصية', priv),
-  h('div', { class: 'full' }, err), btn);
-  return h('section', { class: 'card' }, h('h2', null, 'دفتر جديد'), form);
+        S.ledgers.push(ledger);
+        go('#/l/' + ledger.id);
+      })),
+  ];
 }
 
-function renderLedgerSettings(ledger) {
-  const name = h('input', { id: 's-name', maxlength: '60', value: ledger.name });
-  const priv = h('select', { id: 's-priv' }, h('option', { value: '0' }, 'يمكن ربط كشوفه بأفراد العائلة'), h('option', { value: '1' }, 'خاص بي وحدي'));
-  priv.value = ledger.private ? '1' : '0';
-  const btn = h('button', { class: 'btn ghost full', type: 'submit' }, 'حفظ');
-  const form = h('form', {
-    class: 'entry', novalidate: true,
-    onsubmit: async (e) => {
-      e.preventDefault();
-      btn.disabled = true;
-      try {
-        const { ledger: l } = await api('PATCH', '/api/ledgers/' + ledger.id, { name: name.value, private: priv.value === '1' });
-        Object.assign(ledger, l);
-        if (l.private) state.members.forEach((m) => { if (m.ledger_id === l.id) m.user_id = null; });
-        toast('حُفظت إعدادات الدفتر');
-        renderAll();
-      } catch (ex) { toast(ex.message); btn.disabled = false; }
-    },
-  },
-  h('label', { for: 's-name' }, 'اسم الدفتر', name),
-  h('label', { for: 's-priv' }, 'الخصوصية', priv),
-  btn);
-  return h('section', { class: 'card' }, h('h2', null, 'إعدادات الدفتر'), form);
+function pagePassword() {
+  const cur = h('input', { class: 'ltr', type: 'password', autocomplete: 'current-password' });
+  const next = h('input', { class: 'ltr', type: 'password', autocomplete: 'new-password', placeholder: '8 أحرف على الأقل' });
+  return [
+    pageHead({ back: ['#/', 'الرئيسية'], title: 'كلمة المرور' }),
+    card(null, form([field('pw-cur', 'الحالية', cur, true), field('pw-new', 'الجديدة', next, true)], 'حفظ', async () => {
+      await api('POST', '/api/password', { current: cur.value, next: next.value });
+      toast('تغيّرت كلمة المرور');
+      go('#/');
+    })),
+  ];
 }
 
-// ---------------------------------------------------------------- أفراد العائلة (للمالك)
-function renderFamily() {
-  const err = h('p', { class: 'form-error', role: 'alert' });
-  const name = h('input', { id: 'u-name', maxlength: '40' });
-  const username = h('input', { id: 'u-user', class: 'ltr', maxlength: '30', autocapitalize: 'none', autocomplete: 'off', placeholder: 'mona' });
-  const pw = h('input', { id: 'u-pw', class: 'ltr', maxlength: '128', autocomplete: 'new-password', placeholder: '8 أحرف على الأقل' });
-  const btn = h('button', { class: 'btn full', type: 'submit' }, 'إضافة');
-  const form = h('form', {
-    class: 'entry', novalidate: true,
-    onsubmit: async (e) => {
-      e.preventDefault();
-      err.textContent = '';
-      btn.disabled = true;
-      try {
-        const { user } = await api('POST', '/api/users', { name: name.value, username: username.value, password: pw.value });
-        state.users.push(user);
-        toast(`أُضيف ${user.name}. أعطه اسم المستخدم وكلمة المرور`);
-        renderAll();
-      } catch (ex) {
-        err.textContent = ex.message;
-      } finally {
-        btn.disabled = false;
-      }
-    },
-  },
-  h('label', { class: 'full', for: 'u-name' }, 'الاسم', name),
-  h('label', { for: 'u-user' }, 'اسم المستخدم (إنجليزي)', username),
-  h('label', { for: 'u-pw' }, 'كلمة المرور', pw),
-  h('div', { class: 'full' }, err), btn);
-
-  const rows = state.users.filter((u) => !u.is_owner).map((u) => {
-    const linked = state.members.filter((m) => m.user_id === u.id)
-      .map((m) => (ledgerOf(m.ledger_id) || {}).name?.replace(/^دفتر \d+: /, '') + ': ' + m.name);
-    const reset = h('button', { class: 'btn ghost small', type: 'button' }, 'كلمة مرور جديدة');
-    const toggle = h('button', { class: 'btn ghost small', type: 'button' }, u.disabled ? 'تفعيل' : 'إيقاف');
-    const row = h('div', { class: 'user-row' + (u.disabled ? ' off' : '') },
-      h('div', null, h('div', { class: 'name' }, u.name, ' ', h('span', { class: 'uname' }, u.username)),
-        h('div', { class: 'note' }, linked.length ? 'يرى: ' + linked.join('، ') : 'لم يُربط بأي كشف بعد')),
-      h('div', { class: 'actions' }, reset, toggle));
-    reset.addEventListener('click', () => {
-      const inp = h('input', { class: 'ltr', maxlength: '128', placeholder: 'كلمة المرور الجديدة', autocomplete: 'new-password' });
-      const save = h('button', { class: 'btn small', type: 'button' }, 'حفظ');
-      save.addEventListener('click', async () => {
-        save.disabled = true;
-        try {
-          await api('PATCH', '/api/users/' + u.id, { password: inp.value });
-          toast(`تغيّرت كلمة مرور ${u.name}`);
-          renderAll();
-        } catch (ex) { toast(ex.message); save.disabled = false; }
-      });
-      reset.replaceWith(h('div', { class: 'actions' }, inp, save));
-      inp.focus();
-    });
-    toggle.addEventListener('click', async () => {
-      toggle.disabled = true;
-      try {
-        const { user } = await api('PATCH', '/api/users/' + u.id, { disabled: !u.disabled });
-        Object.assign(u, user);
-        toast(user.disabled ? `أُوقف ${u.name}` : `فُعّل ${u.name}`);
-        renderAll();
-      } catch (ex) { toast(ex.message); toggle.disabled = false; }
-    });
-    return row;
-  });
-
-  return h('div', { class: 'stack' },
-    h('section', { class: 'card' }, h('h2', null, 'إضافة فرد'), form),
-    h('section', { class: 'card' }, h('h2', null, 'أفراد العائلة'),
-      h('p', { class: 'note' }, 'بعد الإضافة افتح الدفتر، ثم كشف الاسم، واختر من يراه من القائمة.'),
-      h('div', { class: 'users-list' }, rows.length ? rows : h('p', { class: 'note' }, 'لم تُضف أحدًا بعد.'))));
+function notFound() {
+  return [pageHead({ back: ['#/', 'الرئيسية'], title: 'غير موجود' }), h('p', { class: 'empty' }, 'هذه الصفحة غير موجودة.')];
 }
 
-// ---------------------------------------------------------------- الدخول وكلمة المرور
-function renderLogin() {
+// ================================================================ الدخول والدعوة
+function bare(...children) {
   document.getElementById('who').hidden = true;
-  document.getElementById('tabs').hidden = true;
-  const err = h('p', { class: 'form-error', role: 'alert' });
-  const user = h('input', { id: 'l-user', class: 'ltr', autocapitalize: 'none', autocomplete: 'username', required: true });
-  const pw = h('input', { id: 'l-pw', class: 'ltr', type: 'password', autocomplete: 'current-password', required: true });
-  const btn = h('button', { class: 'btn', type: 'submit' }, 'دخول');
-  const form = h('form', {
-    novalidate: true,
-    onsubmit: async (e) => {
-      e.preventDefault();
-      err.textContent = '';
-      btn.disabled = true;
-      try {
-        await api('POST', '/api/login', { username: user.value, password: pw.value });
-        await start();
-      } catch (ex) {
-        err.textContent = ex.message;
-        btn.disabled = false;
-      }
-    },
-  },
-  h('label', { for: 'l-user' }, 'اسم المستخدم', user),
-  h('label', { for: 'l-pw' }, 'كلمة المرور', pw),
-  err, btn);
-  document.getElementById('app').replaceChildren(h('section', { class: 'card login' }, h('h2', null, 'تسجيل الدخول'), form));
+  document.getElementById('app').replaceChildren(h('div', { class: 'auth' }, children));
+}
+
+function showLogin() {
+  S.me = null;
+  const user = h('input', { class: 'ltr', autocapitalize: 'none', autocomplete: 'username' });
+  const pw = h('input', { class: 'ltr', type: 'password', autocomplete: 'current-password' });
+  bare(card('تسجيل الدخول', form([field('l-user', 'اسم المستخدم', user, true), field('l-pw', 'كلمة المرور', pw, true)], 'دخول', async () => {
+    await api('POST', '/api/login', { username: user.value, password: pw.value });
+    await boot();
+  }, { single: true })));
   user.focus();
 }
 
-function withPw(parts) {
-  if (!state.showPw) return parts;
-  const err = h('p', { class: 'form-error', role: 'alert' });
-  const cur = h('input', { id: 'p-cur', class: 'ltr', type: 'password', autocomplete: 'current-password' });
-  const next = h('input', { id: 'p-new', class: 'ltr', type: 'password', autocomplete: 'new-password', placeholder: '8 أحرف على الأقل' });
-  const btn = h('button', { class: 'btn', type: 'submit' }, 'حفظ');
-  const cancel = h('button', { class: 'btn ghost', type: 'button', onclick: () => { state.showPw = false; renderAll(); } }, 'إلغاء');
-  const form = h('form', {
-    class: 'entry', novalidate: true,
-    onsubmit: async (e) => {
-      e.preventDefault();
-      err.textContent = '';
-      btn.disabled = true;
-      try {
-        await api('POST', '/api/password', { current: cur.value, next: next.value });
-        state.showPw = false;
-        toast('تغيّرت كلمة المرور');
-        renderAll();
-      } catch (ex) { err.textContent = ex.message; btn.disabled = false; }
-    },
-  },
-  h('label', { for: 'p-cur' }, 'كلمة المرور الحالية', cur),
-  h('label', { for: 'p-new' }, 'الجديدة', next),
-  h('div', { class: 'full' }, err), btn, cancel);
-  return [h('section', { class: 'card' }, h('h2', null, 'تغيير كلمة المرور'), form), ...parts];
+async function showInvite(token) {
+  let name;
+  try {
+    ({ name } = await api('GET', '/api/invite?t=' + encodeURIComponent(token)));
+  } catch (ex) {
+    bare(card('رابط الدعوة', h('p', { class: 'empty' }, ex.message)));
+    return;
+  }
+  const user = h('input', { class: 'ltr', autocapitalize: 'none', autocomplete: 'username', placeholder: 'مثال: mona' });
+  const pw = h('input', { class: 'ltr', type: 'password', autocomplete: 'new-password', placeholder: '8 أحرف على الأقل' });
+  bare(card(`مرحبًا ${name}`,
+    h('p', { class: 'note' }, 'اختر اسم مستخدم بالإنجليزي وكلمة مرور لتدخل وترى حساباتك.'),
+    form([field('iv-user', 'اسم المستخدم', user, true), field('iv-pw', 'كلمة المرور', pw, true)], 'إنشاء الحساب', async () => {
+      await api('POST', '/api/invite', { token, username: user.value, password: pw.value });
+      history.replaceState(null, '', '#/');
+      await boot();
+    }, { single: true })));
 }
 
-document.getElementById('btn-pw').addEventListener('click', () => { state.showPw = !state.showPw; renderAll(); window.scrollTo(0, 0); });
+// ================================================================ التنقل
+function go(hash) {
+  if (location.hash === hash) render(); else location.hash = hash;
+}
+
+function render() {
+  if (!S.me) return;
+  const parts = (location.hash.replace(/^#\/?/, '') || '').split('/');
+  const owner = S.me.isOwner;
+  let page;
+  switch (parts[0]) {
+    case '': page = pageHome(); break;
+    case 'l': page = owner ? pageLedger(parts[1]) : notFound(); break;
+    case 'a': page = pageAccount(parts[1]); break;
+    case 'people': page = owner ? pagePeople() : notFound(); break;
+    case 'p': page = owner ? pagePerson(parts[1]) : notFound(); break;
+    case 'new': page = owner ? pageNewLedger() : notFound(); break;
+    case 'password': page = pagePassword(); break;
+    default: page = notFound();
+  }
+  document.getElementById('app').replaceChildren(...page);
+}
+
+async function load() {
+  const data = await api('GET', '/api/data');
+  Object.assign(S, { users: [], invites: [] }, data);
+}
+
+async function boot() {
+  const m = location.hash.match(/^#\/invite\/([A-Za-z0-9_-]+)$/);
+  if (m) return showInvite(m[1]);
+  try {
+    await load();
+  } catch (ex) {
+    if (ex instanceof AuthError) return showLogin();
+    document.getElementById('app').replaceChildren(h('p', { class: 'empty' }, ex.message));
+    return;
+  }
+  document.getElementById('who-name').textContent = S.me.name;
+  document.getElementById('who').hidden = false;
+  render();
+  window.scrollTo(0, 0);
+}
+
+window.addEventListener('hashchange', () => {
+  if (/^#\/invite\//.test(location.hash)) { boot(); return; }
+  render();
+  window.scrollTo(0, 0);
+});
 document.getElementById('btn-out').addEventListener('click', async () => {
   try { await api('POST', '/api/logout'); } catch { /* نكمل */ }
-  Object.assign(state, { me: null, ledgers: [], members: [], tx: [], users: [], current: null, showPw: false });
-  renderLogin();
+  history.replaceState(null, '', '#/');
+  showLogin();
 });
-
-// ---------------------------------------------------------------- البدء
-async function start() {
-  try {
-    const data = await api('GET', '/api/data');
-    Object.assign(state, { users: [] }, data);
-    document.getElementById('who-name').textContent = data.me.name;
-    document.getElementById('who').hidden = false;
-    state.current = state.ledgers[0] ? state.ledgers[0].id : (data.me.isOwner ? '__new' : null);
-    renderAll();
-  } catch (ex) {
-    if (!document.querySelector('.login')) document.getElementById('app').replaceChildren(h('p', { class: 'state' }, ex.message));
-  }
-}
-start();
+boot();

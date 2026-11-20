@@ -1,7 +1,7 @@
 import { identify } from '../_lib/auth.js';
 import { fail } from '../_lib/http.js';
 
-const PUBLIC = new Set(['/api/login']);
+const PUBLIC = new Set(['/api/login', '/api/invite']);
 
 export async function onRequest(context) {
   const { request, env } = context;

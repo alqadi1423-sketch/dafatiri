@@ -3,7 +3,7 @@ const COOKIE = 'sid';
 const DAYS = 30;
 
 const hex = (buf) => [...new Uint8Array(buf)].map((b) => b.toString(16).padStart(2, '0')).join('');
-async function sha256(text) {
+export async function sha256(text) {
   return hex(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(text)));
 }
 
@@ -23,9 +23,13 @@ export async function identify(request, env) {
   return { id: row.id, username: row.username, name: row.name, isOwner: !!row.is_owner };
 }
 
-export async function startSession(env, userId) {
+export function randomToken() {
   const bytes = crypto.getRandomValues(new Uint8Array(32));
-  const token = btoa(String.fromCharCode(...bytes)).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+  return btoa(String.fromCharCode(...bytes)).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
+
+export async function startSession(env, userId) {
+  const token = randomToken();
   const expires = new Date(Date.now() + DAYS * 864e5).toISOString().replace(/\.\d+Z$/, 'Z');
   await env.DB.batch([
     env.DB.prepare(`DELETE FROM sessions WHERE expires_at <= strftime('%Y-%m-%dT%H:%M:%SZ','now')`),
